@@ -80,9 +80,9 @@ export function endMsg(m) {
 
 export function streamerLiveMsg(s) {
   return [
-    `📺 <b>${esc(s.owner || s.room_id)}</b> 开播了`,
+    `📺 <b>${esc(s.owner || `斗鱼 ${s.room_id}`)}</b> 开播了`,
     s.title ? esc(s.title) : '',
-    `<a href="${roomUrl(s.room_id)}">douyu.com/${esc(s.room_id)}</a>`,
+    `${s.category ? esc(s.category) + ' · ' : ''}<a href="${roomUrl(s.room_id)}">douyu.com/${esc(s.room_id)}</a>`,
   ].filter(Boolean).join('\n');
 }
 

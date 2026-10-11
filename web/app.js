@@ -183,11 +183,20 @@
   function roomList(rooms) {
     if (!rooms.length) return '<div class="mini"><p class="mini-empty">管理员还没有添加斗鱼房间</p></div>';
     const sorted = [...rooms].sort((a, b) => Number(b.live) - Number(a.live));
-    return `<div class="mini">${sorted.map((r) => `<a class="mini-row ${r.live ? 'live' : ''}" href="https://www.douyu.com/${esc(r.room_id)}" target="_blank" rel="noopener">
-      <span class="room-dot" aria-hidden="true"></span>
-      <span class="mini-main"><span class="mini-title">${esc(r.owner || r.room_id)}${r.live ? ' <span class="badge badge-live">LIVE</span>' : ''}</span>
-        <span class="mini-sub">${r.live ? esc(r.title || '直播中') : `未开播${r.changed_at ? ' · ' + dur(nowSec() - r.changed_at) + '前下播' : ''}`}</span></span>
-      <span class="mini-arrow">↗</span></a>`).join('')}</div>`;
+    const t = nowSec();
+    return `<div class="mini">${sorted.map((r) => {
+      const name = r.owner || `斗鱼 ${r.room_id}`;
+      const since = r.live
+        ? (r.show_time ? `已播 ${dur(t - r.show_time)}` : '直播中')
+        : (r.changed_at ? `${dur(t - r.changed_at)}前下播` : '未开播');
+      const meta = [r.category, since, r.room_id].filter(Boolean).map(esc).join(' · ');
+      return `<a class="mini-row room-row ${r.live ? 'live' : ''}" href="https://www.douyu.com/${esc(r.room_id)}" target="_blank" rel="noopener" title="${esc(r.title || '')}">
+        <span class="room-avatar">${r.avatar ? `<img src="${esc(r.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}<i class="room-dot" aria-hidden="true"></i></span>
+        <span class="mini-main"><span class="mini-title">${esc(name)}${r.live ? ' <span class="badge badge-live">LIVE</span>' : ''}</span>
+          ${r.title ? `<span class="mini-sub room-sub">${esc(r.title)}</span>` : ''}
+          <span class="mini-sub">${meta}</span></span>
+        <span class="mini-arrow">↗</span></a>`;
+    }).join('')}</div>`;
   }
 
   function resultList(list) {

@@ -152,7 +152,7 @@ async function roomsText(db) {
   const rooms = await getStreamers(db);
   if (!rooms.length) return '📺 还没有添加斗鱼主播。';
   return ['📺 <b>斗鱼主播</b>', ...rooms.map((r) =>
-    `${r.live ? '🔴' : '⚫'} <a href="${roomUrl(r.room_id)}">${esc(r.owner || r.room_id)}</a>${r.live && r.title ? ` · ${esc(r.title)}` : ''}`)].join('\n');
+    `${r.live ? '🔴' : '⚫'} <a href="${roomUrl(r.room_id)}">${esc(r.owner || `斗鱼 ${r.room_id}`)}</a>${r.category ? ` · ${esc(r.category)}` : ''}${r.live && r.title ? `\n　 ${esc(r.title)}` : ''}`)].join('\n');
 }
 
 async function teamListView(db) {
@@ -228,10 +228,17 @@ async function roomAdd(ctx, chat, arg) {
   let info;
   try { info = await roomInfo(ctx, id); } catch { return sendMessage(ctx, chat, '斗鱼接口访问失败，稍后再试。'); }
   if (!info.ok) return sendMessage(ctx, chat, `房间 ${id} 不存在或无法读取。`);
-  await ctx.env.DB.prepare(`INSERT INTO streamers (room_id, owner, title, live, changed_at, added_at) VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(room_id) DO UPDATE SET owner = excluded.owner, title = excluded.title`)
-    .bind(id, info.owner, info.title, info.live ? 1 : 0, null, now()).run(); // changed_at 只记真实的开/下播时刻
-  return sendMessage(ctx, chat, `已添加 <b>${esc(info.owner || id)}</b>（${id}），当前${info.live ? '🔴 直播中' : '未开播'}。开播时会通知所有人。`);
+  await addRoom(ctx.env.DB, id, info);
+  return sendMessage(ctx, chat, `已添加 <b>${esc(info.owner || id)}</b>（${id}${info.category ? ' · ' + esc(info.category) : ''}），当前${info.live ? '🔴 直播中' : '未开播'}。开播时会通知所有人。`);
+}
+
+// changed_at 只记真实的开/下播时刻，添加时留空；show_time 记下当前这场，避免刚添加就推「开播了」
+export function addRoom(db, id, info) {
+  return db.prepare(`INSERT INTO streamers (room_id, owner, title, category, avatar, live, show_time, changed_at, added_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
+    ON CONFLICT(room_id) DO UPDATE SET owner = excluded.owner, title = excluded.title, category = excluded.category, avatar = excluded.avatar,
+      live = excluded.live, show_time = COALESCE(excluded.show_time, streamers.show_time)`)
+    .bind(id, info.owner, info.title, info.category || null, info.avatar || null, info.live ? 1 : 0, info.live ? info.showTime : null, now()).run();
 }
 
 export function addTeam(db, team) {

@@ -76,6 +76,18 @@ const UPSERT_UPDATE = `ON CONFLICT(id) DO UPDATE SET ${COLS.filter((c) => c !== 
   (c === 'maps' ? 'maps = COALESCE(excluded.maps, matches.maps)' : `${c} = excluded.${c}`)).join(', ')}`;
 const UPSERT_SQL = `INSERT INTO matches (${COLS.join(', ')}) VALUES (${COLS.map((_, i) => `?${i + 1}`).join(', ')})`;
 
+// 和库里那行比，有没有需要写回的变化（D1 免费版每天只有 10 万行写入额度，而且索引也算写入）
+const CMP = COLS.filter((c) => c !== 'id' && c !== 'maps' && c !== 'updated_at');
+export function matchChanged(old, m) {
+  if (!old) return true;
+  for (const c of CMP) if ((old[c] ?? null) !== (m[c] ?? null)) return true;
+  if (m.maps !== undefined) {
+    const oldMaps = typeof old.maps === 'string' ? old.maps : JSON.stringify(old.maps ?? []);
+    if (oldMaps !== JSON.stringify(m.maps ?? [])) return true;
+  }
+  return false;
+}
+
 export function upsertMatchStmt(db, m, insertOnly = false) {
   const row = { ...m, maps: m.maps ? JSON.stringify(m.maps) : null, updated_at: now(), winner_id: m.winner_id ?? null };
   return db.prepare(`${UPSERT_SQL} ${insertOnly ? 'ON CONFLICT(id) DO NOTHING' : UPSERT_UPDATE}`)

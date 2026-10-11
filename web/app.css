@@ -274,14 +274,6 @@ a.tour-stage:hover { color: var(--text); text-decoration: underline; text-decora
 }
 .ext:hover { background: var(--black); color: var(--white); }
 
-/* ---------- 主播 ---------- */
-.room .room-head { display: flex; align-items: center; gap: 0.6rem; padding: 0.9rem 1rem; border-bottom: 3px solid var(--line); }
-.room-status { width: 12px; height: 12px; border: 2px solid var(--line); background: var(--text-muted); flex-shrink: 0; }
-.room.live .room-status { animation: blink 1s step-end infinite; border-color: var(--black); }
-.room-name { font-family: 'Archivo Black', sans-serif; font-size: 1.05rem; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.room-title { padding: 0.75rem 1rem; font-size: 0.85rem; min-height: 2.8rem; }
-.room:not(.live) { background-image: radial-gradient(circle, var(--dots) 1px, transparent 1px); background-size: 4px 4px; }
-
 /* ---------- 空状态 / 加载 ---------- */
 .empty {
   text-align: center; padding: 3.5rem 2rem;
@@ -521,8 +513,22 @@ a.mini-row:hover { background: var(--row-hover); }
 .mini-arrow { font-size: 0.8rem; color: var(--text-muted); }
 .mini-empty { padding: 1rem; font-size: 0.82rem; color: var(--text-muted); text-align: center; }
 
-.room-dot { width: 12px; height: 12px; border: 2px solid var(--line); background: var(--text-muted); }
-.mini-row.live .room-dot { border-color: var(--black); animation: blink 1s step-end infinite; }
+.room-avatar {
+  position: relative;
+  width: 40px; height: 40px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 2px solid var(--black); background: var(--white);
+  font-family: 'Archivo Black', sans-serif; font-size: 0.7rem;
+}
+.room-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.room-row:not(.live) .room-avatar img { filter: grayscale(1); opacity: 0.6; }
+.room-dot {
+  position: absolute; right: -5px; bottom: -5px;
+  width: 12px; height: 12px;
+  border: 2px solid var(--black); background: var(--text-muted);
+}
+.mini-row.live .room-dot { animation: blink 1s step-end infinite; }
+.room-row .room-sub { color: var(--text); font-size: 0.78rem; }
 
 .res-score {
   display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 0.5rem;

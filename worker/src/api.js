@@ -18,7 +18,7 @@ import { getSubs, getStreamers, listMatches, getKV } from './db.js';
 import { matchUrl, stagesUrl, searchTeams, teamById } from './bo3.js';
 import { roomInfo } from './douyu.js';
 import { refreshSchedule } from './engine.js';
-import { addTeam } from './bot.js';
+import { addTeam, addRoom } from './bot.js';
 import { sendMessage } from './tgapi.js';
 
 const TIERS = ['s', 'a', 'b', 'c'];
@@ -61,7 +61,10 @@ export async function handleApi(req, env, path, ctx) {
       live: live.map(pubMatch),
       results: results.map(pubMatch),
       subs: pubSubs(subs),
-      rooms: rooms.map((r) => ({ room_id: r.room_id, owner: r.owner, title: r.title, live: !!r.live, changed_at: r.changed_at })),
+      rooms: rooms.map((r) => ({
+        room_id: r.room_id, owner: r.owner, title: r.title, category: r.category, avatar: r.avatar,
+        live: !!r.live, changed_at: r.changed_at, show_time: r.show_time,
+      })),
     }, 200, cache);
   }
   return json({ error: 'not found' }, 404);
@@ -116,9 +119,7 @@ async function handleAdmin(req, env, sub, ctx) {
       if (!id) return json({ error: '房间号格式不对' }, 400);
       const info = await roomInfo(ctx, id).catch(() => null);
       if (!info?.ok) return json({ error: `房间 ${id} 不存在或无法读取` }, 404);
-      await db.prepare(`INSERT INTO streamers (room_id, owner, title, live, changed_at, added_at) VALUES (?, ?, ?, ?, NULL, ?)
-        ON CONFLICT(room_id) DO UPDATE SET owner = excluded.owner, title = excluded.title`)
-        .bind(id, info.owner, info.title, info.live ? 1 : 0, now()).run();
+      await addRoom(db, id, info);
       return json({ ok: true, room: { room_id: id, ...info } });
     }
     if (parts[1] && method === 'DELETE') {

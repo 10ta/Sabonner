@@ -11,7 +11,7 @@
 // 所有事件都先 claim 去重键，再入队，保证同一事件只推一次。
 
 import { now } from './util.js';
-import { getSubs, getKV, setKVStmt, recipients, upsertMatchStmt, parseMatchRow, cleanup } from './db.js';
+import { getSubs, getKV, setKVStmt, recipients, upsertMatchStmt, matchChanged, parseMatchRow, cleanup } from './db.js';
 import { matchesByTiers, matchesByTeams, matchesByIds, gamesOf } from './bo3.js';
 import { roomInfo } from './douyu.js';
 import { preMsg, liveCard, mapEndMsg, endMsg, streamerLiveMsg, dailyMsg } from './format.js';
@@ -74,7 +74,19 @@ export async function refreshSchedule(ctx) {
     if (m.status === 'current' || (m.status === 'upcoming' && m.start_ts <= t + WINDOW)) map.set(m.id, m);
   }
 
-  const stmts = [...map.values()].map((m) => upsertMatchStmt(db, m, m.status === 'current'));
+  // 只写有变化的比赛：先把库里现有的这些行读出来对比（读的额度比写宽得多）
+  const existing = new Map();
+  const ids = [...map.keys()].map(Number).filter(Number.isFinite);
+  if (ids.length) {
+    const { results } = await db.prepare(`SELECT * FROM matches WHERE id IN (${ids.join(',')})`).all();
+    for (const r of results) existing.set(r.id, r);
+  }
+  const stmts = [];
+  for (const m of map.values()) {
+    const old = existing.get(m.id);
+    if (m.status === 'current') { if (!old) stmts.push(upsertMatchStmt(db, m, true)); continue; }
+    if (matchChanged(old, m)) stmts.push(upsertMatchStmt(db, m));
+  }
   // 不再命中订阅的未来比赛（退订、改期出窗口）删掉；10 分钟内要开的保留，避免误删
   const keep = [...map.keys()];
   stmts.push(db.prepare(
@@ -179,7 +191,7 @@ export async function liveTick(ctx, minute) {
     const m = { ...old, ...f, maps: old.maps };
 
     if (!live && !done) { // 仍是 upcoming（延迟开赛），只同步时间等字段
-      stmts.push(upsertMatchStmt(db, m));
+      if (matchChanged(old, m)) stmts.push(upsertMatchStmt(db, m));
       continue;
     }
 
@@ -210,7 +222,7 @@ export async function liveTick(ctx, minute) {
     else if (changed) items.push(...fanout(to, 'live_edit', liveCard(m, m.maps, done), m.id));
     if (ending) items.push(...fanout(to, 'send', endMsg(m), m.id));
 
-    stmts.push(upsertMatchStmt(db, m));
+    if (matchChanged(old, m)) stmts.push(upsertMatchStmt(db, m));
   }
 
   if (stmts.length) await db.batch(stmts);
@@ -243,11 +255,18 @@ export async function douyuTick(ctx, minute) {
     if (info.live !== wasLive) {
       // 下播不到 10 分钟又开播（断流重连）不算新开播
       const flap = info.live && r.changed_at && t - r.changed_at < 600;
-      if (info.live && !flap) went.push({ ...r, ...info });
-      stmts.push(db.prepare('UPDATE streamers SET live = ?, changed_at = ?, owner = ?, title = ? WHERE room_id = ?')
-        .bind(info.live ? 1 : 0, t, info.owner, info.title, r.room_id));
-    } else if (info.title !== r.title || info.owner !== r.owner) {
-      stmts.push(db.prepare('UPDATE streamers SET owner = ?, title = ? WHERE room_id = ?').bind(info.owner, info.title, r.room_id));
+      // 同一场直播（开播时间没变）只推一次
+      const sameShow = info.live && info.showTime && info.showTime === r.show_time;
+      // 之前没记录过开播时间（刚升级、刚添加）且这场已经开了半小时以上：说明不是刚开播，只记录不推
+      const stale = info.live && !r.show_time && info.showTime && t - info.showTime > 1800;
+      if (info.live && !flap && !sameShow && !stale) went.push({ ...r, ...info });
+      stmts.push(db.prepare('UPDATE streamers SET live = ?, changed_at = ?, show_time = COALESCE(?, show_time) WHERE room_id = ?')
+        .bind(info.live ? 1 : 0, t, info.live ? info.showTime : null, r.room_id));
+    }
+    // 资料有变化才写（热度每分钟都变，不存）
+    if (info.title !== r.title || info.owner !== r.owner || info.category !== r.category || info.avatar !== r.avatar) {
+      stmts.push(db.prepare('UPDATE streamers SET owner = ?, title = ?, category = ?, avatar = ? WHERE room_id = ?')
+        .bind(info.owner, info.title, info.category, info.avatar, r.room_id));
     }
   });
 
