@@ -2,10 +2,10 @@
 
 CS2 比赛订阅与斗鱼开播提醒：Cloudflare Worker 后端 + Telegram bot + 网页（CF Pages / Vercel，沿用 1999 主题风格）。
 
-- 按 **tier**（S/A/B/C）或 **队伍** 订阅比赛：开赛前 1 天、前 30 分钟各提醒一次
+- 按 **tier**（S/A/B/C）、**bo3 星级**（≥ N 星）或 **队伍** 订阅比赛，三项任一命中即可：开赛前 1 天、前 30 分钟各提醒一次
 - 比赛进行中：一张可原地更新的比分卡片；每张图打完单独推送；结束时推送胜者
 - 每天 **UTC 0 点**发今日赛程并自动置顶，第二天替换；没有比赛时告诉你下一场是什么
-- 消息里带队伍国旗和赛段（如 [decider / 3rd place](https://bo3.gg/tournaments/esl-pro-league-season-24#tab-stages)，链接到 bo3 的赛段页）
+- 消息里带队伍国旗、世界排名、赛事奖金、LAN / ONLINE、星级、bo3 的 AI 预测和每张图的比分，以及赛段（如 [decider / 3rd place](https://bo3.gg/tournaments/esl-pro-league-season-24#tab-stages)，链接到 bo3 的赛段页）
 - **斗鱼主播开播**提醒（断流 10 分钟内重连不重复推）
 - 只有管理员能改订阅；其他人 `/start` 申请，管理员批准后只能接收推送和查看
 - 网页任何人可看；管理员输入管理密码后可在网页上改订阅、审批用户
@@ -245,7 +245,7 @@ Framework preset 选 **None**，Build command **留空**，Build output director
 |---|---|
 | `/today` 今日赛程 | |
 | `/next` 即将开始 | `/team 名字` 搜索订阅；不带参数列出并可退订 |
-| `/live` 进行中 | `/tier` 切换 tier |
+| `/live` 进行中 | `/tier` 切换 tier；`/stars` 按星级订阅 |
 | `/results` 最近赛果 | `/room 房间号` 添加；不带参数列出并可删除 |
 | `/subs` 当前订阅 | `/users` 审批 / 撤销 |
 | `/rooms` 主播状态 | `/refresh` 立即刷新赛程 |
@@ -263,6 +263,8 @@ cron 每分钟一次：
 | 赛前提醒 | 每分钟 | 0（只查 D1） |
 | 每日预报 | UTC 0 点那一分钟 | 每人 3 个（发送、置顶、取消旧置顶），人多时顺延 |
 | 国家代码表 | 30 天一次 | 3 个 |
+
+**存储上限**：比赛数据在 D1 里只保留开赛后 7 天，另外最多 3000 行（超出时删最旧的）；推送去重记录 30 天，发件队列 6 小时，赛事缓存 30 天。清理每小时跑一次，数据库通常只有几百 KB。
 
 **D1 用量**：D1 是 Cloudflare 的数据库（SQLite），免费额度每天读 500 万行、写 10 万行、存储 5GB，**整个 Cloudflare 账户共享**；超出后当天查询报错，次日恢复，不会扣费。比赛数据只在有变化时才写，订阅 S tier + 几支队伍时写入通常每天几千行。用量在控制台 Storage & Databases → D1 → sabonner → Metrics 查看。
 | 发件 | 每分钟 | 用掉剩余预算，免费版每次调用上限 50 |

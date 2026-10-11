@@ -101,16 +101,19 @@
     const score = side === 1 ? m.s1 : m.s2;
     const other = side === 1 ? m.s2 : m.s1;
     const showScore = m.status !== 'upcoming';
+    const rank = side === 1 ? m.team1_rank : m.team2_rank;
+    const aiPick = m.ai && m.ai.winner_id === id;
     let cls = 'team';
     if (stars.has(id)) cls += ' star';
+    if (aiPick) cls += ' ai';
     if (m.status === 'finished') {
       const won = m.winner_id ? m.winner_id === id : score > other;
       cls += won ? ' win' : ' lose';
     }
     const f = flag(cc);
     return `<div class="${cls}">
-      <span class="team-logo">${logo ? `<img src="${esc(logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}</span>
-      <span class="team-name" title="${esc(name)}">${f ? `<span class="flag">${f}</span>` : ''}${esc(name)}</span>
+      <span class="team-logo"${aiPick ? ' title="AI 预测胜者"' : ''}>${logo ? `<img src="${esc(logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}${aiPick ? '<i class="ai-tag">AI</i>' : ''}</span>
+      <span class="team-name" title="${esc(name)}${rank ? ` · 世界排名 #${rank}` : ''}">${f ? `<span class="flag">${f}</span>` : ''}${esc(name)}${rank ? `<span class="rank">#${rank}</span>` : ''}</span>
       ${showScore ? `<span class="team-score">${score ?? 0}</span>` : ''}
     </div>`;
   }
@@ -119,7 +122,7 @@
     const maps = (m.maps || []).filter((g) => m.status !== 'finished' || g.status === 'finished');
     if (!maps.length) return '';
     return `<div class="maps">${maps.map((g) => {
-      const name = g.map || '?';
+      const name = g.map || '待定';
       let score = '', win = '';
       if (g.status === 'finished' && g.sc1 != null) {
         score = `${g.sc1}:${g.sc2}`;
@@ -132,6 +135,31 @@
       }
       return `<div class="map ${esc(g.status)}"><span class="map-n">${g.n}</span><span class="map-name">${esc(name)}</span><span class="map-score">${score}</span><span class="map-win">${esc(win)}</span></div>`;
     }).join('')}</div>`;
+  }
+
+  const fmtPrize = (n) => (!n ? '' : n >= 1e6 ? `$${+(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `$${+(n / 1e3).toFixed(1)}K` : `$${n}`);
+  const starRow = (n) => `<span class="stars" title="bo3 星级 ${n}/5">${'<b>★</b>'.repeat(n)}${'<i>★</i>'.repeat(5 - n)}</span>`;
+
+  function metaStrip(m) {
+    const parts = [];
+    if (m.prize) parts.push(`<span class="meta-item">${fmtPrize(m.prize)}</span>`);
+    if (m.event_type === 'lan') parts.push('<span class="meta-item meta-lan">LAN</span>');
+    else if (m.event_type === 'online') parts.push('<span class="meta-item meta-online">ONLINE</span>');
+    if (m.stars != null) parts.push(`<span class="meta-item">${starRow(m.stars)}</span>`);
+    if (m.tournament_hltv) parts.push(`<a class="meta-item meta-link" href="${esc(m.tournament_hltv)}" target="_blank" rel="noopener" title="HLTV 赛事页">HLTV ↗</a>`);
+    return parts.length ? `<div class="card-meta">${parts.join('')}</div>` : '';
+  }
+
+  function aiLine(m) {
+    if (!m.ai) return '';
+    const side = m.ai.winner_id === m.team1_id ? 1 : m.ai.winner_id === m.team2_id ? 2 : 0;
+    if (!side) return '';
+    const name = side === 1 ? m.team1 : m.team2;
+    // 比分从预测胜者的角度写：「SPIRIT 2:0」
+    const score = m.ai.s1 != null && m.ai.s2 != null ? ` ${side === 1 ? `${m.ai.s1}:${m.ai.s2}` : `${m.ai.s2}:${m.ai.s1}`}` : '';
+    let verdict = '';
+    if (m.status === 'finished' && m.winner_id) verdict = m.winner_id === m.ai.winner_id ? '<b class="ai-ok">✓ 猜中</b>' : '<b class="ai-miss">✗ 没猜中</b>';
+    return `<div class="ai-line"><i class="ai-tag">AI</i><span>预测 <strong>${esc(name)}</strong>${score}</span>${verdict}</div>`;
   }
 
   function matchCard(m, stars) {
@@ -153,7 +181,8 @@
         <span class="tour"><span class="tour-name" title="${esc(m.tournament)}">${esc(m.tournament || '未知赛事')}</span>${stage}</span>
         <span class="bo">BO${m.bo}</span>
       </div>
-      <div class="teams">${teamRow(m, 1, stars)}${teamRow(m, 2, stars)}</div>
+      ${metaStrip(m)}
+      <div class="teams">${teamRow(m, 1, stars)}${teamRow(m, 2, stars)}${aiLine(m)}</div>
       ${mapRows(m)}
       <div class="card-foot"><span class="when">${when}</span><a class="ext" href="${esc(m.url)}" target="_blank" rel="noopener">bo3.gg ↗</a></div>
     </article>`;
@@ -213,7 +242,7 @@
       return `<a class="mini-row" href="${esc(m.url)}" target="_blank" rel="noopener" title="${esc(m.tournament)}${m.stage ? ' · ' + esc(m.stage) : ''}">
         <span class="res-date">${esc(lbl.rel || lbl.main.split(' ')[0])}</span>
         <span class="mini-main"><span class="res-score"><span class="t1 ${w1 ? '' : 'lose'}">${name(1)}</span><b>${m.s1}:${m.s2}</b><span class="${w1 ? 'lose' : ''}">${name(2)}</span></span>
-          <span class="mini-sub">${esc(String(m.tier || '').toUpperCase())} · ${esc(m.tournament)}${m.stage ? ' · ' + esc(m.stage) : ''}</span></span>
+          <span class="mini-sub">${esc(String(m.tier || '').toUpperCase())} · ${esc(m.tournament)}${m.stage ? ' · ' + esc(m.stage) : ''}${m.ai && m.winner_id ? (m.ai.winner_id === m.winner_id ? ' · AI ✓' : ' · AI ✗') : ''}</span></span>
         <span class="mini-arrow">↗</span></a>`;
     }).join('')}</div>`;
   }
@@ -238,9 +267,12 @@
     const statusText = { pending: '待审批', approved: '已批准', denied: '已拒绝' };
 
     return `<div class="admin">
-      <section class="admin-block"><h3>Tier 订阅</h3><div class="admin-body">
+      <section class="admin-block"><h3>订阅范围</h3><div class="admin-body">
+        <p class="admin-hint">Tier、星级、队伍三项任一命中就推送。</p>
         <div class="tier-toggles">${['s', 'a', 'b', 'c'].map((t) => `<button class="chip-btn" data-act="tier" data-tier="${t}" aria-pressed="${tiers.has(t)}">${t.toUpperCase()}</button>`).join('')}</div>
-        <p class="admin-hint">订阅某个 tier 会推送该级别全部比赛。C 档比赛很多，可能超出免费版 CPU 上限。</p>
+        <p class="admin-hint">C 档比赛很多，可能超出免费版 CPU 上限。</p>
+        <div class="star-toggles">${[0, 1, 2, 3, 4, 5].map((n) => `<button class="chip-btn" data-act="stars" data-stars="${n}" aria-pressed="${(d.subs?.stars || 0) === n}">${n ? `≥${n}★` : '关'}</button>`).join('')}</div>
+        <p class="admin-hint">按 bo3 星级订阅（0–5 星，越高越受关注）。</p>
       </div></section>
 
       <section class="admin-block"><h3>队伍 <span class="muted">${teams.length}</span></h3><div class="admin-body">
@@ -331,8 +363,9 @@
     const subs = d.subs || { tiers: [], teams: [] };
     $('#subs').innerHTML = `<span class="subs-label">订阅</span>${
       subs.tiers.map((x) => `<span class="chip chip-tier">TIER ${esc(x.toUpperCase())}</span>`).join('')}${
+      subs.stars ? `<span class="chip chip-tier">★ ≥ ${subs.stars}</span>` : ''}${
       subs.teams.map((x) => `<span class="chip">${x.logo ? `<img src="${esc(x.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${flag(x.cc)} ${esc(x.name)}</span>`).join('')}${
-      !subs.tiers.length && !subs.teams.length ? '<span class="muted">还没有订阅</span>' : ''}`;
+      !subs.tiers.length && !subs.teams.length && !subs.stars ? '<span class="muted">还没有订阅</span>' : ''}`;
 
     const stars = subTeamIds();
     keepFocus(() => {
@@ -462,6 +495,11 @@
         const t = btn.dataset.tier;
         cur.has(t) ? cur.delete(t) : cur.add(t);
         adminAction(() => api('/api/admin/tiers', { admin: true, method: 'PUT', body: { tiers: [...cur] } }), `Tier ${t.toUpperCase()} ${cur.has(t) ? '已开启' : '已关闭'}`);
+        break;
+      }
+      case 'stars': {
+        const n = Number(btn.dataset.stars);
+        adminAction(() => api('/api/admin/stars', { admin: true, method: 'PUT', body: { stars: n } }), n ? `已订阅 ${n} 星及以上` : '已关闭星级订阅');
         break;
       }
       case 'team-add':

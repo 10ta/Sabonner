@@ -1,6 +1,7 @@
 // bo3.gg 非官方 API 适配器
 // 已验证可用的参数：status in、tier in、id in、team1_id/team2_id in、sort=start_date、
-// with=teams,tournament,stage,round、page[limit]≤100、teams 的 name eq/like、id eq、/countries
+// with=teams,tournament,stage,round,ai_predictions,games、stars in、page[limit]≤100、teams 的 name eq/like、id eq、
+// /countries、/tournaments（event_type、hltv_url）
 // 不支持：按 start_date 过滤（会被忽略）
 
 const BASE = 'https://api.bo3.gg/api/v1';
@@ -63,7 +64,8 @@ function stageText(m) {
 }
 
 export function normalizeMatch(m, countries = {}) {
-  return {
+  const ai = Array.isArray(m.ai_predictions) ? m.ai_predictions[0] : m.ai_predictions;
+  const out = {
     id: m.id,
     slug: m.slug,
     team1_id: m.team1_id,
@@ -74,31 +76,57 @@ export function normalizeMatch(m, countries = {}) {
     team2_cc: countries[m.team2?.country_id] || null,
     team1_logo: m.team1?.image_url || null,
     team2_logo: m.team2?.image_url || null,
+    team1_rank: m.team1?.rank || null,
+    team2_rank: m.team2?.rank || null,
     tournament: m.tournament?.name || '',
     tournament_slug: m.tournament?.slug || null,
+    tournament_id: m.tournament_id ?? m.tournament?.id ?? null,
+    prize: m.tournament?.prize || null,
     stage: stageText(m),
     tier: m.tier || '',
+    stars: m.stars ?? null,
     bo: m.bo_type || 1,
     start_ts: ts(m.start_date),
     status: m.status,
     s1: m.team1_score ?? 0,
     s2: m.team2_score ?? 0,
     winner_id: m.winner_team_id ?? null,
+    ai_winner_id: ai?.prediction_winner_team_id ?? null,
+    ai_s1: ai?.prediction_team1_score ?? null,
+    ai_s2: ai?.prediction_team2_score ?? null,
   };
+  if (Array.isArray(m.games)) out.maps = mapsFromGames(m.games, out);
+  return out;
 }
 
-const WITH = 'teams,tournament,stage,round';
+const WITH = 'teams,tournament,stage,round,ai_predictions';
 const MATCH_EXTRA = { with: WITH, sort: 'start_date' };
 const ACTIVE = ['matches.status', 'in', 'upcoming,current'];
 
 async function matches(ctx, url) {
   const countries = await ensureCountries(ctx);
-  return (await get(ctx, url)).map((m) => normalizeMatch(m, countries));
+  const list = (await get(ctx, url)).map((m) => normalizeMatch(m, countries));
+  // 线下 / 线上、HLTV 赛事页只在赛事接口里有，按赛事 id 查一次缓存一天
+  const tours = await ensureTournaments(ctx, [...new Set(list.map((m) => m.tournament_id).filter(Boolean))]);
+  for (const m of list) {
+    const t = tours.get(m.tournament_id);
+    m.event_type = t?.event_type || null;
+    m.tournament_hltv = t?.hltv_url || null;
+    if (!m.prize && t?.prize) m.prize = t.prize;
+  }
+  return list;
 }
 
 export async function matchesByTiers(ctx, tiers, limit = 50) {
   if (!tiers.length) return [];
   return matches(ctx, buildUrl('matches', [ACTIVE, ['matches.tier', 'in', tiers.join(',')]], { ...MATCH_EXTRA, 'page[limit]': limit }));
+}
+
+// 星级 ≥ min 的比赛（bo3 不支持 gte，用 in 列出 min..5）
+export async function matchesByStars(ctx, min, limit = 50) {
+  if (!min || min < 1 || min > 5) return [];
+  const list = Array.from({ length: 6 - min }, (_, i) => min + i).join(',');
+  return matches(ctx, buildUrl('matches', [ACTIVE, ['matches.stars', 'in', list]], { ...MATCH_EXTRA, 'page[limit]': limit }));
 }
 
 export async function matchesByTeams(ctx, teamIds, limit = 30) {
@@ -111,9 +139,41 @@ export async function matchesByTeams(ctx, teamIds, limit = 30) {
   return [...a, ...b];
 }
 
+// 直播轮询用：连同每张图的数据一起取，省掉逐场查地图的请求
 export async function matchesByIds(ctx, ids) {
   if (!ids.length) return [];
-  return matches(ctx, buildUrl('matches', [['matches.id', 'in', ids.join(',')]], { with: WITH, 'page[limit]': Math.min(ids.length, 100) }));
+  return matches(ctx, buildUrl('matches', [['matches.id', 'in', ids.join(',')]], { with: `${WITH},games`, 'page[limit]': Math.min(ids.length, 100) }));
+}
+
+// ---------- 赛事缓存 ----------
+
+const TOUR_TTL = 86400;
+export async function ensureTournaments(ctx, ids) {
+  const out = new Map();
+  if (!ids.length) return out;
+  const db = ctx.env.DB;
+  const nums = ids.map(Number).filter(Number.isFinite);
+  const { results } = await db.prepare(`SELECT * FROM tournaments WHERE id IN (${nums.join(',')})`).all();
+  const fresh = Date.now() / 1000 - TOUR_TTL;
+  for (const r of results) out.set(r.id, r);
+  const missing = nums.filter((id) => !out.has(id) || out.get(id).updated_at < fresh);
+  if (!missing.length) return out;
+  try {
+    const list = await get(ctx, buildUrl('tournaments', [['tournaments.id', 'in', missing.join(',')]], { 'page[limit]': Math.min(missing.length, 100) }));
+    const t = Math.floor(Date.now() / 1000);
+    const stmts = [];
+    for (const x of list) {
+      const row = { id: x.id, prize: x.prize || null, event_type: x.event_type || null, hltv_url: x.hltv_url || null, updated_at: t };
+      out.set(x.id, row);
+      stmts.push(db.prepare(`INSERT INTO tournaments (id, prize, event_type, hltv_url, updated_at) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET prize = excluded.prize, event_type = excluded.event_type, hltv_url = excluded.hltv_url, updated_at = excluded.updated_at`)
+        .bind(row.id, row.prize, row.event_type, row.hltv_url, row.updated_at));
+    }
+    if (stmts.length) await db.batch(stmts);
+  } catch (e) {
+    console.error('tournaments', e?.message || e); // 拿不到就先不显示线下 / 线上，下次再试
+  }
+  return out;
 }
 
 // "Chinggis Warriors" -> "cw"
@@ -135,26 +195,26 @@ function whichSide(name, m) {
   return 0;
 }
 
-// 返回 [{ n, map, status, sc1, sc2, winner }]，sc1/sc2 是 team1/team2 视角的回合分
-export async function gamesOf(ctx, match) {
-  const url = buildUrl('games', [['games.match_id', 'eq', match.id]], { 'page[limit]': 10 });
-  const games = await get(ctx, url);
-  return games
+// games → [{ n, map, status, sc1, sc2, side, winner }]，sc1/sc2 是 team1/team2 视角的回合分
+// 胜者优先用 winner_team_clan.team_id 判断属于哪队，没有时再按名字（可能是简称）猜
+export function mapsFromGames(games, match) {
+  return [...games]
     .sort((x, y) => (x.number ?? 0) - (y.number ?? 0))
     .map((g) => {
       const out = {
         n: g.number,
-        map: String(g.map_name || '').replace(/^de_/, '') || '?',
+        map: String(g.map_name || '').replace(/^de_/, '') || null,
         status: g.status,
         winner: g.winner_clan_name || null,
       };
       if (g.status === 'finished' && g.winner_clan_score != null) {
-        const side = whichSide(g.winner_clan_name, match);
+        const wid = g.winner_team_clan?.team_id;
+        let side = wid && wid === match.team1_id ? 1 : wid && wid === match.team2_id ? 2 : 0;
+        if (!side) side = whichSide(g.winner_clan_name, match);
         const w = g.winner_clan_score;
         const l = g.loser_clan_score;
-        if (side === 1) { out.sc1 = w; out.sc2 = l; out.side = 1; }
-        else if (side === 2) { out.sc1 = l; out.sc2 = w; out.side = 2; }
-        else { out.sc1 = w; out.sc2 = l; out.side = 0; }
+        if (side === 2) { out.sc1 = l; out.sc2 = w; } else { out.sc1 = w; out.sc2 = l; }
+        out.side = side;
       }
       return out;
     });

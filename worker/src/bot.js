@@ -35,6 +35,7 @@ const HELP_OWNER = [
   '<b>管理</b>',
   '/team 名字 — 搜索并订阅队伍；不带参数列出已订阅',
   '/tier — 切换订阅的 tier',
+  '/stars — 按比赛星级订阅（≥ 几星）',
   '/room 房间号 — 添加斗鱼主播；不带参数列出并可删除',
   '/users — 用户审批与撤销',
   '/refresh — 立即刷新赛程',
@@ -48,7 +49,7 @@ export const PUBLIC_COMMANDS = [
 export const OWNER_COMMANDS = [
   ['today', '今日赛程'], ['next', '即将开始的比赛'], ['live', '正在进行的比赛'], ['results', '最近赛果'],
   ['subs', '订阅'], ['rooms', '斗鱼主播'], ['team', '搜索/管理队伍'], ['tier', '切换 tier'],
-  ['room', '添加/管理斗鱼房间'], ['users', '用户审批'], ['refresh', '刷新赛程'], ['status', '运行状态'], ['help', '帮助'],
+  ['stars', '按星级订阅'], ['room', '添加/管理斗鱼房间'], ['users', '用户审批'], ['refresh', '刷新赛程'], ['status', '运行状态'], ['help', '帮助'],
 ];
 
 async function roleOf(env, id) {
@@ -124,6 +125,8 @@ export async function handleUpdate(ctx, update) {
       return arg ? teamSearch(ctx, chat, arg) : reply(...await teamListView(env.DB));
     case 'tier':
       return reply(...await tierView(env.DB));
+    case 'stars':
+      return reply(...await starsView(env.DB));
     case 'room':
       return arg ? roomAdd(ctx, chat, arg) : reply(...await roomListView(env.DB));
     case 'users':
@@ -145,7 +148,8 @@ async function subsText(db) {
   const s = await getSubs(db);
   const tiers = s.tiers.length ? s.tiers.map(tierLabel).join(' / ') : '无';
   const teams = s.teams.length ? s.teams.map((t) => `${flag(t.cc)}${flag(t.cc) ? ' ' : ''}${esc(t.name)}`).join('、') : '无';
-  return `<b>订阅</b>\nTier：${tiers}\n队伍：${teams}`;
+  const stars = s.stars ? `${'★'.repeat(s.stars)} 及以上` : '无';
+  return `<b>订阅</b>（三项任一命中就推送）\nTier：${tiers}\n星级：${stars}\n队伍：${teams}`;
 }
 
 async function roomsText(db) {
@@ -167,6 +171,15 @@ async function tierView(db) {
   return [
     '<b>Tier 订阅</b>（点按钮切换）\n订阅某个 tier 会收到该级别所有比赛的预告和比分。',
     kb([TIERS.map((t) => ({ text: `${on.has(t) ? '✅' : '⬜'} ${tierLabel(t)}`, data: `tier:${t}` }))]),
+  ];
+}
+
+async function starsView(db) {
+  const { stars } = await getSubs(db);
+  return [
+    `<b>按星级订阅</b>（点按钮切换）\n当前：${stars ? `${'★'.repeat(stars)} 及以上` : '关闭'}\nbo3 给比赛打 0–5 星，越高越受关注。和 tier、队伍订阅是「或」的关系。`,
+    kb([[1, 2, 3].map((n) => ({ text: `${stars === n ? '✅ ' : ''}≥${n}★`, data: `stars:${n}` })),
+      [4, 5].map((n) => ({ text: `${stars === n ? '✅ ' : ''}≥${n}★`, data: `stars:${n}` })).concat([{ text: stars ? '关闭' : '✅ 关闭', data: 'stars:0' }])]),
   ];
 }
 
@@ -280,6 +293,13 @@ async function handleCallback(ctx, cq) {
       await refreshSchedule(ctx).catch(() => null);
       await answerCallback(ctx, cq.id, `${tierLabel(val)} ${has ? '已关闭' : '已开启'}`);
       return rerender(await tierView(db));
+    }
+    case 'stars': {
+      const n = Math.max(0, Math.min(5, Number(val) || 0));
+      await db.prepare("INSERT INTO kv (k, v) VALUES ('sub_stars', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(String(n)).run();
+      const r = await refreshSchedule(ctx).catch(() => null);
+      await answerCallback(ctx, cq.id, n ? `已订阅 ${n} 星及以上${r ? `，跟踪 ${r.tracked} 场` : ''}` : '已关闭星级订阅');
+      return rerender(await starsView(db));
     }
     case 'r-': {
       await db.prepare('DELETE FROM streamers WHERE room_id = ?').bind(val).run();

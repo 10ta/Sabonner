@@ -7,6 +7,7 @@
 //     POST   teams        {id}        订阅队伍
 //     DELETE teams/:id                退订
 //     PUT    tiers        {tiers}     设置 tier 订阅
+//     PUT    stars        {stars}     星级订阅（≥ 几星，0 关闭）
 //     POST   rooms        {room}      添加斗鱼房间
 //     DELETE rooms/:id                删除
 //     GET    users                    用户列表
@@ -27,12 +28,16 @@ const pubMatch = (m) => ({
   id: m.id, url: matchUrl(m), stage_url: stagesUrl(m),
   team1: m.team1, team2: m.team2, team1_id: m.team1_id, team2_id: m.team2_id,
   team1_cc: m.team1_cc, team2_cc: m.team2_cc, team1_logo: m.team1_logo, team2_logo: m.team2_logo,
-  tournament: m.tournament, stage: m.stage, tier: m.tier, bo: m.bo, start: m.start_ts,
+  team1_rank: m.team1_rank, team2_rank: m.team2_rank,
+  tournament: m.tournament, tournament_hltv: m.tournament_hltv, prize: m.prize, event_type: m.event_type,
+  stage: m.stage, tier: m.tier, stars: m.stars, bo: m.bo, start: m.start_ts,
   status: m.status, s1: m.s1, s2: m.s2, winner_id: m.winner_id, maps: m.maps,
+  ai: m.ai_winner_id ? { winner_id: m.ai_winner_id, s1: m.ai_s1, s2: m.ai_s2 } : null,
 });
 
 const pubSubs = (s) => ({
   tiers: s.tiers,
+  stars: s.stars,
   teams: s.teams.map((t) => ({ id: t.team_id, name: t.name, cc: t.cc, logo: t.logo })),
 });
 
@@ -109,6 +114,13 @@ async function handleAdmin(req, env, sub, ctx) {
       db.prepare('DELETE FROM sub_tiers'),
       ...tiers.map((t) => db.prepare('INSERT INTO sub_tiers (tier) VALUES (?)').bind(t)),
     ]);
+    return json({ ok: true, refresh: await refresh(), subs: pubSubs(await getSubs(db)) });
+  }
+
+  // 星级
+  if (parts[0] === 'stars' && method === 'PUT') {
+    const n = Math.max(0, Math.min(5, Number(body.stars) || 0));
+    await db.prepare("INSERT INTO kv (k, v) VALUES ('sub_stars', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(String(n)).run();
     return json({ ok: true, refresh: await refresh(), subs: pubSubs(await getSubs(db)) });
   }
 

@@ -567,6 +567,57 @@ a.mini-row:hover { background: var(--row-hover); }
   .col-side { position: static; max-height: none; overflow: visible; padding: 0; }
 }
 
+/* ---------- 赛事信息条 / 排名 / AI ---------- */
+.card-meta {
+  display: flex; flex-wrap: wrap; gap: 0.35rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 3px solid var(--line);
+}
+.meta-item {
+  display: inline-flex; align-items: center; height: 22px; padding: 0 0.4rem;
+  border: 2px solid var(--black);
+  font: 400 0.68rem 'Archivo Black', sans-serif; letter-spacing: 0.04em;
+  text-decoration: none; color: var(--text);
+}
+.meta-lan { background: var(--black); color: var(--white); }
+.meta-online { border-style: dashed; color: var(--text-muted); }
+a.meta-link:hover { background: var(--black); color: var(--white); }
+.stars { letter-spacing: 0.02em; font-size: 0.8rem; line-height: 1; }
+.stars b { font-weight: 400; color: var(--accent-yellow); -webkit-text-stroke: 1px var(--black); }
+.stars i { font-style: normal; color: color-mix(in srgb, var(--text-muted) 45%, transparent); }
+
+.team-name .rank {
+  margin-left: 0.45rem; vertical-align: 2px;
+  font: 700 0.68rem 'Space Grotesk', sans-serif; letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.team-logo { position: relative; overflow: visible; }
+.team-logo img { overflow: hidden; }
+.team.ai .team-logo { border: 3px solid var(--accent); box-shadow: 2px 2px 0 var(--black); }
+.ai-tag {
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 14px; padding: 0 3px;
+  font: 400 0.55rem/1 'Archivo Black', sans-serif; font-style: normal; letter-spacing: 0.04em;
+  background: var(--accent); color: var(--on-accent);
+  border: 1.5px solid var(--black);
+}
+.team-logo .ai-tag { position: absolute; top: -8px; left: -8px; }
+
+.ai-line {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  margin-top: 0.1rem; padding-top: 0.55rem;
+  border-top: 2px dashed var(--line);
+  font-size: 0.78rem; color: var(--text-muted);
+}
+.ai-line strong { color: var(--text); text-transform: uppercase; }
+.ai-ok, .ai-miss { font-size: 0.72rem; padding: 0 0.3rem; border: 2px solid var(--black); }
+.ai-ok { background: var(--accent-green); color: #000; }
+.ai-miss { background: var(--accent-red); color: #fff; }
+
+.star-toggles { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0.4rem; }
+.star-toggles .chip-btn { font-size: 0.85rem; height: 40px; }
+
 /* ---------- 窄屏 ---------- */
 @media (max-width: 640px) {
   .header-content { padding: 0.6rem 1rem; }
@@ -584,4 +635,5 @@ a.mini-row:hover { background: var(--row-hover); }
   .sec-head h2 { font-size: 1.15rem; }
   .to-top { width: 48px; height: 48px; }
   .theme-menu-cols { grid-template-columns: 1fr; }
+  .star-toggles { grid-template-columns: repeat(3, 1fr); }
 }

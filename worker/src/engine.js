@@ -12,14 +12,13 @@
 
 import { now } from './util.js';
 import { getSubs, getKV, setKVStmt, recipients, upsertMatchStmt, matchChanged, parseMatchRow, cleanup } from './db.js';
-import { matchesByTiers, matchesByTeams, matchesByIds, gamesOf } from './bo3.js';
+import { matchesByTiers, matchesByTeams, matchesByStars, matchesByIds } from './bo3.js';
 import { roomInfo } from './douyu.js';
 import { preMsg, liveCard, mapEndMsg, endMsg, streamerLiveMsg, dailyMsg } from './format.js';
 import { enqueue, fanout, flush } from './outbox.js';
 
 const WINDOW = 7 * 86400;        // 只跟踪 7 天内的比赛
 const OUTBOX_RESERVE = 0;
-const LIVE_RESERVE = 12;         // 直播轮询时给发件队列至少留这么多子请求
 const MAX_ROOMS_PER_TICK = 12;
 
 // 批量领取去重键，返回本次新领到的键
@@ -62,13 +61,15 @@ export async function refreshSchedule(ctx) {
   const subs = await getSubs(db);
   const teamIds = subs.teams.map((x) => x.team_id);
 
-  const [byTier, byTeam] = await Promise.all([
+  // tier、队伍、星级三种订阅取并集（OR）
+  const [byTier, byTeam, byStars] = await Promise.all([
     matchesByTiers(ctx, subs.tiers),
     matchesByTeams(ctx, teamIds),
+    matchesByStars(ctx, subs.stars),
   ]);
 
   const map = new Map();
-  for (const m of [...byTier, ...byTeam]) {
+  for (const m of [...byTier, ...byTeam, ...byStars]) {
     if (!m.start_ts) continue;
     if (!m.team1_id && !m.team2_id) continue; // 两队都未定（TBD vs TBD）不跟踪；对阵确定后下次刷新自动补上
     if (m.status === 'current' || (m.status === 'upcoming' && m.start_ts <= t + WINDOW)) map.set(m.id, m);
@@ -188,7 +189,7 @@ export async function liveTick(ctx, minute) {
 
     const live = f.status === 'current';
     const done = TERMINAL(f.status);
-    const m = { ...old, ...f, maps: old.maps };
+    const m = { ...old, ...f, maps: f.maps ?? old.maps }; // 地图数据随比赛一起返回
 
     if (!live && !done) { // 仍是 upcoming（延迟开赛），只同步时间等字段
       if (matchChanged(old, m)) stmts.push(upsertMatchStmt(db, m));
@@ -203,18 +204,14 @@ export async function liveTick(ctx, minute) {
     const ending = got0.has(`end:${m.id}`);
 
     const scoreChanged = f.s1 !== old.s1 || f.s2 !== old.s2;
-    const needGames = opening || ending || scoreChanged || minute % 3 === 0;
-    if (needGames && ctx.left() > LIVE_RESERVE) {
-      try { m.maps = await gamesOf(ctx, m); } catch (e) { console.error('games', m.id, e); }
-    }
 
-    // 新打完的地图
-    const finishedMaps = (m.maps || []).filter((g) => g.status === 'finished');
+    // 新打完的地图：bo3 会先把地图标成 finished、过一会儿才填比分，比分到了才算（否则消息里只有「—」）
+    const finishedMaps = (m.maps || []).filter((g) => g.status === 'finished' && g.sc1 != null);
     const mapKeys = finishedMaps.map((g) => `map:${m.id}:${g.n}`);
     const gotMaps = await claim(db, mapKeys);
     // 中途才开始跟踪（opening）时，已结束的地图静默补记；整场结束时由结束消息统一说明
     if (!opening && !done) {
-      for (const g of finishedMaps) if (gotMaps.has(`map:${m.id}:${g.n}`)) items.push(...fanout(to, 'send', mapEndMsg(m, g), m.id));
+      for (const g of finishedMaps) if (gotMaps.has(`map:${m.id}:${g.n}`)) items.push(...fanout(to, 'send', mapEndMsg(m, g, m.maps), m.id));
     }
 
     const changed = scoreChanged || JSON.stringify(m.maps) !== JSON.stringify(old.maps) || old.status !== f.status;
