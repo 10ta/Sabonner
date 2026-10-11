@@ -1,0 +1,71 @@
+diff --git a/init.sh b/init.sh
+index 6b345bb..fccd160 100755
+--- a/init.sh
++++ b/init.sh
+@@ -215,11 +215,17 @@ done
+ SETUP_OK=0
+ for i in 1 2 3 4 5; do
+   res="$(curl -s "$WORKER_URL/setup?token=$ADMIN_TOKEN" || true)"
+-  if [[ "$(grep -o '"ok":true' <<<"$res" | wc -l)" -ge 3 ]]; then SETUP_OK=1; break; fi
++  # 只要求 webhook 成功；命令菜单失败不影响使用
++  if grep -qE '"webhook":\{"ok":true' <<<"$res"; then SETUP_OK=1; break; fi
+   sleep 4   # secret 刚设置，等新版本生效
+ done
+ (( SETUP_OK )) || die "注册失败，Worker 返回：$res"
+ ok "webhook 已注册"
++if grep -q 'chat not found' <<<"$res"; then
++  warn "管理员命令菜单暂未设置：你还没给这个 bot 发过消息。发一次 /start 就会自动补上，不影响使用"
++elif ! grep -qE '"ownerCommands":\{"ok":true' <<<"$res"; then
++  warn "管理员命令菜单设置失败（不影响使用）：$res"
++fi
+ 
+ info="$(curl -s "https://api.telegram.org/bot${TG_TOKEN}/getWebhookInfo" || true)"
+ if grep -q '"last_error_message"' <<<"$info"; then
+diff --git a/worker/src/bot.js b/worker/src/bot.js
+index 45706a0..0c52938 100644
+--- a/worker/src/bot.js
++++ b/worker/src/bot.js
+@@ -92,6 +92,8 @@ export async function handleUpdate(ctx, update) {
+   switch (cmd) {
+     case 'start':
+     case 'help':
++      // 管理员菜单只能在对方和 bot 有过对话后设置，所以在 owner 发 /start 时补设一次
++      if (owner && cmd === 'start') await setOwnerCommands(ctx).catch(() => null);
+       return reply(owner ? HELP_OWNER : HELP_PUBLIC);
+     case 'next':
+       return reply(matchList('📅 <b>即将开始</b>', await listMatches(env.DB, 'upcoming', 15), ctx.tz, 'next'));
+@@ -289,9 +291,17 @@ async function handleCallback(ctx, cq) {
+ 
+ // ---------- 初始化：webhook + 命令菜单 ----------
+ 
++const toCmds = (list) => list.map(([command, description]) => ({ command, description }));
++
++export function setOwnerCommands(ctx) {
++  return tg(ctx, 'setMyCommands', {
++    commands: toCmds(OWNER_COMMANDS),
++    scope: { type: 'chat', chat_id: Number(ctx.env.OWNER_ID) },
++  });
++}
++
+ export async function setup(ctx, origin) {
+   const env = ctx.env;
+-  const toCmds = (list) => list.map(([command, description]) => ({ command, description }));
+   const out = {};
+   out.webhook = await tg(ctx, 'setWebhook', {
+     url: `${origin}/tg`,
+@@ -301,10 +311,11 @@ export async function setup(ctx, origin) {
+   });
+   out.publicCommands = await tg(ctx, 'setMyCommands', { commands: toCmds(PUBLIC_COMMANDS) });
+   if (env.OWNER_ID) {
+-    out.ownerCommands = await tg(ctx, 'setMyCommands', {
+-      commands: toCmds(OWNER_COMMANDS),
+-      scope: { type: 'chat', chat_id: Number(env.OWNER_ID) },
+-    });
++    out.ownerCommands = await setOwnerCommands(ctx);
++    // 管理员还没给 bot 发过消息时 Telegram 会报 chat not found，不影响使用：发 /start 时会自动补设
++    if (!out.ownerCommands.ok && /chat not found/i.test(out.ownerCommands.description || '')) {
++      out.ownerCommands.hint = 'send /start to the bot; the admin menu will be set then';
++    }
+   }
+   return out;
+ }

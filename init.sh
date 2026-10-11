@@ -215,11 +215,17 @@ done
 SETUP_OK=0
 for i in 1 2 3 4 5; do
   res="$(curl -s "$WORKER_URL/setup?token=$ADMIN_TOKEN" || true)"
-  if [[ "$(grep -o '"ok":true' <<<"$res" | wc -l)" -ge 3 ]]; then SETUP_OK=1; break; fi
+  # 只要求 webhook 成功；命令菜单失败不影响使用
+  if grep -qE '"webhook":\{"ok":true' <<<"$res"; then SETUP_OK=1; break; fi
   sleep 4   # secret 刚设置，等新版本生效
 done
 (( SETUP_OK )) || die "注册失败，Worker 返回：$res"
 ok "webhook 已注册"
+if grep -q 'chat not found' <<<"$res"; then
+  warn "管理员命令菜单暂未设置：你还没给这个 bot 发过消息。发一次 /start 就会自动补上，不影响使用"
+elif ! grep -qE '"ownerCommands":\{"ok":true' <<<"$res"; then
+  warn "管理员命令菜单设置失败（不影响使用）：$res"
+fi
 
 info="$(curl -s "https://api.telegram.org/bot${TG_TOKEN}/getWebhookInfo" || true)"
 if grep -q '"last_error_message"' <<<"$info"; then

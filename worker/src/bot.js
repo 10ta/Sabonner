@@ -92,6 +92,8 @@ export async function handleUpdate(ctx, update) {
   switch (cmd) {
     case 'start':
     case 'help':
+      // 管理员菜单只能在对方和 bot 有过对话后设置，所以在 owner 发 /start 时补设一次
+      if (owner && cmd === 'start') await setOwnerCommands(ctx).catch(() => null);
       return reply(owner ? HELP_OWNER : HELP_PUBLIC);
     case 'next':
       return reply(matchList('📅 <b>即将开始</b>', await listMatches(env.DB, 'upcoming', 15), ctx.tz, 'next'));
@@ -289,9 +291,17 @@ async function handleCallback(ctx, cq) {
 
 // ---------- 初始化：webhook + 命令菜单 ----------
 
+const toCmds = (list) => list.map(([command, description]) => ({ command, description }));
+
+export function setOwnerCommands(ctx) {
+  return tg(ctx, 'setMyCommands', {
+    commands: toCmds(OWNER_COMMANDS),
+    scope: { type: 'chat', chat_id: Number(ctx.env.OWNER_ID) },
+  });
+}
+
 export async function setup(ctx, origin) {
   const env = ctx.env;
-  const toCmds = (list) => list.map(([command, description]) => ({ command, description }));
   const out = {};
   out.webhook = await tg(ctx, 'setWebhook', {
     url: `${origin}/tg`,
@@ -301,10 +311,11 @@ export async function setup(ctx, origin) {
   });
   out.publicCommands = await tg(ctx, 'setMyCommands', { commands: toCmds(PUBLIC_COMMANDS) });
   if (env.OWNER_ID) {
-    out.ownerCommands = await tg(ctx, 'setMyCommands', {
-      commands: toCmds(OWNER_COMMANDS),
-      scope: { type: 'chat', chat_id: Number(env.OWNER_ID) },
-    });
+    out.ownerCommands = await setOwnerCommands(ctx);
+    // 管理员还没给 bot 发过消息时 Telegram 会报 chat not found，不影响使用：发 /start 时会自动补设
+    if (!out.ownerCommands.ok && /chat not found/i.test(out.ownerCommands.description || '')) {
+      out.ownerCommands.hint = 'send /start to the bot; the admin menu will be set then';
+    }
   }
   return out;
 }

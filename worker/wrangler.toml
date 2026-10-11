@@ -9,7 +9,7 @@ crons = ["* * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "sabonner"
-database_id = "REPLACE_WITH_YOUR_D1_ID"
+database_id = "a36ed902-76f2-43f9-90c5-ef78da17472c"
 
 [vars]
 # 推送和列表里显示的时区
