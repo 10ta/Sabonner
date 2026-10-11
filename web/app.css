@@ -469,17 +469,6 @@ input:focus { box-shadow: 3px 3px 0 var(--accent); }
 }
 .sec-head h2 { font-size: 1.35rem; }
 
-.columns {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 380px;
-  gap: 2rem;
-  align-items: start;
-}
-.col-side { position: sticky; top: 76px; max-height: calc(100vh - 92px); overflow-y: auto; padding: 0 10px 10px 0; scrollbar-width: thin; }
-.col-main .grid { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
-.col-main .day-head h2 { font-size: 1rem; }
-.col-main .day-head { border-bottom-width: 3px; }
-
 /* 进行中为空时的一条提示 */
 .idle {
   display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
@@ -492,53 +481,121 @@ input:focus { box-shadow: 3px 3px 0 var(--accent); }
 .idle a { text-decoration: none; }
 .idle a:hover { text-decoration: underline; text-decoration-thickness: 2px; }
 
-/* ---------- 侧栏紧凑列表 ---------- */
-.mini {
-  background: var(--card-bg);
-  border: var(--border-width) solid var(--black);
-  box-shadow: var(--shadow-offset) var(--shadow-offset) 0 var(--shadow);
-  --line: color-mix(in srgb, var(--black) var(--line-mix), var(--white));
+/* ---------- 分栏标题右侧的小字 / 展开按钮 ---------- */
+.sec-note {
+  margin-left: auto;
+  display: flex; align-items: center; gap: 0.6rem;
+  font-size: 0.78rem; font-weight: 700; color: var(--text-muted);
 }
-.mini-row {
-  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 0.6rem;
-  padding: 0.6rem 0.85rem;
-  border-bottom: 2px solid var(--line);
-  text-decoration: none; color: inherit;
+.sec-more {
+  height: 28px; padding: 0 0.6rem;
+  font: 700 0.75rem 'Space Grotesk', sans-serif; letter-spacing: 0.04em;
+  background: var(--card-bg); color: var(--text);
+  border: 2px solid var(--black); box-shadow: 2px 2px 0 var(--shadow);
+  cursor: pointer;
 }
-.mini-row:last-child { border-bottom: none; }
-a.mini-row:hover { background: var(--row-hover); }
-.mini-main { min-width: 0; }
-.mini-title { display: block; font-weight: 700; font-size: 0.88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mini-sub { display: block; font-size: 0.72rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mini-arrow { font-size: 0.8rem; color: var(--text-muted); }
-.mini-empty { padding: 1rem; font-size: 0.82rem; color: var(--text-muted); text-align: center; }
+.sec-more:hover { background: var(--accent); color: var(--on-accent); }
+.sec-more:active { transform: translate(2px, 2px); box-shadow: none; }
 
+/* ---------- 赛果：紧凑小卡 ---------- */
+.res-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 0.9rem;
+}
+.res {
+  display: flex; flex-direction: column; gap: 0.3rem;
+  padding: 0.55rem 0.7rem 0.6rem;
+  background: var(--card-bg); color: inherit; text-decoration: none;
+  border: 3px solid var(--black);
+  box-shadow: 4px 4px 0 var(--shadow);
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+  min-width: 0;
+}
+.res[hidden] { display: none; }
+.res:hover { transform: translate(-2px, -2px); box-shadow: 6px 6px 0 var(--shadow); }
+.res-head {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.4rem;
+  padding-bottom: 0.3rem; margin-bottom: 0.1rem;
+  border-bottom: 2px solid var(--line);
+  font-size: 0.68rem; color: var(--text-muted);
+}
+.tier.tier-sm { width: 18px; height: 18px; font-size: 0.6rem; border-width: 1.5px; }
+.res-tour { font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.res-when { font-weight: 700; white-space: nowrap; }
+.res-team { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 0.5rem; }
+.res-logo {
+  width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center; overflow: hidden;
+  border: 1.5px solid var(--line); background: var(--white);
+  font: 400 0.5rem 'Archivo Black', sans-serif;
+}
+.res-logo img { width: 100%; height: 100%; object-fit: contain; padding: 1px; }
+.res-name {
+  display: flex; align-items: center; min-width: 0;
+  font-family: 'Twemoji Country Flags', 'Archivo Black', sans-serif; font-size: 0.85rem; text-transform: uppercase;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.res-name .flag { margin-right: 0.3rem; }
+.res-name .rank { margin-left: 0.35rem; font: 700 0.62rem 'Space Grotesk', sans-serif; color: var(--text-muted); }
+.res-name .ai-tag { margin-left: 0.4rem; flex-shrink: 0; }
+.res-name .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.res-name .flag, .res-name .rank { flex-shrink: 0; }
+.res-team.star .res-name::after { content: '★'; margin-left: 0.3rem; color: var(--accent-yellow); -webkit-text-stroke: 1px var(--black); }
+.res-s {
+  min-width: 1.6rem; height: 22px; padding: 0 0.3rem;
+  display: flex; align-items: center; justify-content: center;
+  font: 400 0.85rem 'Archivo Black', sans-serif;
+  border: 2px solid var(--black);
+}
+.res-team.win .res-s { background: var(--accent); color: var(--on-accent); }
+.res-team.lose .res-name, .res-team.lose .res-s { color: var(--text-muted); }
+.res-team.lose .res-logo { opacity: 0.55; }
+
+/* ---------- 主播：直播分栏顶部的小条 ---------- */
+.streamers { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1.25rem; }
+.streamer {
+  flex: 0 1 300px; min-width: 0;
+  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 0.6rem;
+  padding: 0.4rem 0.65rem 0.4rem 0.45rem;
+  background: var(--card-bg); color: inherit; text-decoration: none;
+  border: 3px solid var(--black);
+  box-shadow: 3px 3px 0 var(--shadow);
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+}
+.streamer:hover { transform: translate(-2px, -2px); box-shadow: 5px 5px 0 var(--shadow); }
+.streamer:not(.live) { border-style: dashed; box-shadow: none; }
+.streamer:not(.live) .st-name { color: var(--text-muted); }
 .room-avatar {
   position: relative;
-  width: 40px; height: 40px; flex-shrink: 0;
+  width: 32px; height: 32px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
   border: 2px solid var(--black); background: var(--white);
-  font-family: 'Archivo Black', sans-serif; font-size: 0.7rem;
+  font-family: 'Archivo Black', sans-serif; font-size: 0.6rem;
 }
 .room-avatar img { width: 100%; height: 100%; object-fit: cover; }
-.room-row:not(.live) .room-avatar img { filter: grayscale(1); opacity: 0.6; }
+.streamer:not(.live) .room-avatar img { filter: grayscale(1); opacity: 0.6; }
 .room-dot {
-  position: absolute; right: -5px; bottom: -5px;
-  width: 12px; height: 12px;
-  border: 2px solid var(--black); background: var(--text-muted);
+  position: absolute; right: -4px; bottom: -4px;
+  width: 9px; height: 9px;
+  border: 1.5px solid var(--black); background: var(--text-muted);
 }
-.mini-row.live .room-dot { animation: blink 1s step-end infinite; }
-.room-row .room-sub { color: var(--text); font-size: 0.78rem; }
-
-.res-score {
-  display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 0.5rem;
-  font-family: 'Twemoji Country Flags', 'Archivo Black', sans-serif; font-size: 0.85rem; text-transform: uppercase;
+.streamer.live .room-dot { animation: blink 1s step-end infinite; }
+.st-main { min-width: 0; display: flex; flex-direction: column; }
+.st-name {
+  display: flex; align-items: center; gap: 0.35rem;
+  font-weight: 700; font-size: 0.82rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.res-score .t1 { text-align: right; }
-.res-score span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.res-score .lose { color: var(--text-muted); }
-.res-score b { font-weight: 400; padding: 0.05rem 0.4rem; border: 2px solid var(--black); background: var(--accent); color: var(--on-accent); }
-.res-date { font: 700 0.65rem 'Space Grotesk', sans-serif; letter-spacing: 0.06em; color: var(--text-muted); writing-mode: horizontal-tb; width: 2.6rem; }
+.st-sub { font-size: 0.7rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.live-tag {
+  flex-shrink: 0;
+  height: 13px; padding: 0 3px;
+  display: inline-flex; align-items: center;
+  font: 400 0.5rem/1 'Archivo Black', sans-serif; font-style: normal; letter-spacing: 0.06em;
+  background: var(--accent-red); color: #fff;
+  border: 1.5px solid var(--black);
+}
 
 /* ---------- 回到顶部 ---------- */
 .to-top {
@@ -562,27 +619,25 @@ a.mini-row:hover { background: var(--row-hover); }
   .section.flash > .sec-head { animation: none; }
 }
 
-@media (max-width: 1100px) {
-  .columns { grid-template-columns: 1fr; gap: 0; }
-  .col-side { position: static; max-height: none; overflow: visible; padding: 0; }
+/* ---------- 头部第二行：赛段 · 奖金 · LAN · 星级 · HLTV ---------- */
+.tour-sub {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.55rem;
+  margin-top: 0.2rem;
+  font-size: 0.72rem; color: var(--text-muted);
 }
-
-/* ---------- 赛事信息条 / 排名 / AI ---------- */
-.card-meta {
-  display: flex; flex-wrap: wrap; gap: 0.35rem;
-  padding: 0.5rem 1rem;
-  border-bottom: 3px solid var(--line);
+.tour-sub > * { flex-shrink: 0; }
+.tour-sub .tour-stage { display: inline; flex-shrink: 1; min-width: 0; max-width: 100%; }
+.tm-prize { font: 400 0.7rem 'Archivo Black', sans-serif; color: var(--text); }
+.tm-tag {
+  display: inline-flex; align-items: center; height: 15px; padding: 0 4px;
+  font: 400 0.55rem/1 'Archivo Black', sans-serif; letter-spacing: 0.06em;
+  border: 1.5px solid var(--black);
 }
-.meta-item {
-  display: inline-flex; align-items: center; height: 22px; padding: 0 0.4rem;
-  border: 2px solid var(--black);
-  font: 400 0.68rem 'Archivo Black', sans-serif; letter-spacing: 0.04em;
-  text-decoration: none; color: var(--text);
-}
-.meta-lan { background: var(--black); color: var(--white); }
-.meta-online { border-style: dashed; color: var(--text-muted); }
-a.meta-link:hover { background: var(--black); color: var(--white); }
-.stars { letter-spacing: 0.02em; font-size: 0.8rem; line-height: 1; }
+.tm-lan { background: var(--black); color: var(--white); }
+.tm-online { border-style: dashed; color: var(--text-muted); }
+.tm-link { font: 700 0.66rem 'Space Grotesk', sans-serif; letter-spacing: 0.04em; color: var(--text-muted); text-decoration: none; }
+.tm-link:hover { color: var(--text); text-decoration: underline; text-decoration-thickness: 2px; }
+.stars { letter-spacing: 0.02em; font-size: 0.72rem; line-height: 1; }
 .stars b { font-weight: 400; color: var(--accent-yellow); -webkit-text-stroke: 1px var(--black); }
 .stars i { font-style: normal; color: color-mix(in srgb, var(--text-muted) 45%, transparent); }
 
@@ -604,16 +659,10 @@ a.meta-link:hover { background: var(--black); color: var(--white); }
 }
 .team-logo .ai-tag { position: absolute; top: -8px; left: -8px; }
 
-.ai-line {
-  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
-  margin-top: 0.1rem; padding-top: 0.55rem;
-  border-top: 2px dashed var(--line);
-  font-size: 0.78rem; color: var(--text-muted);
-}
-.ai-line strong { color: var(--text); text-transform: uppercase; }
-.ai-ok, .ai-miss { font-size: 0.72rem; padding: 0 0.3rem; border: 2px solid var(--black); }
-.ai-ok { background: var(--accent-green); color: #000; }
-.ai-miss { background: var(--accent-red); color: #fff; }
+.ai-tag span { margin-left: 2px; }
+.ai-tag.ai-ok { background: var(--accent-green); color: #000; }
+.ai-tag.ai-miss { background: var(--accent-red); color: #fff; }
+.ai-tag.ai-miss span { text-decoration: line-through; }
 
 .star-toggles { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0.4rem; }
 .star-toggles .chip-btn { font-size: 0.85rem; height: 40px; }
@@ -629,6 +678,9 @@ a.meta-link:hover { background: var(--black); color: var(--white); }
   .stat-label { font-size: 0.6rem; letter-spacing: 0.04em; }
   .main { padding: 1rem; }
   .grid, .admin { grid-template-columns: 1fr; gap: 1.1rem; }
+  .res-grid { grid-template-columns: 1fr; gap: 0.7rem; }
+  .streamer { flex-basis: 100%; }
+  .sec-note > span { display: none; }
   .jumpbar-inner { padding: 0.5rem 1rem; }
   .jump { height: 34px; padding: 0 0.65rem; font-size: 0.76rem; }
   .section { scroll-margin-top: 64px; }

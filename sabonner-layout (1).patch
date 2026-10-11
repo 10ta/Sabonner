@@ -1,0 +1,786 @@
+diff --git a/README.md b/README.md
+index da40d45..73f672a 100644
+--- a/README.md
++++ b/README.md
+@@ -3,7 +3,7 @@
+ CS2 比赛订阅与斗鱼开播提醒：Cloudflare Worker 后端 + Telegram bot + 网页（CF Pages / Vercel，沿用 1999 主题风格）。
+ 
+ - 按 **tier**（S/A/B/C）、**bo3 星级**（≥ N 星）或 **队伍** 订阅比赛，三项任一命中即可：开赛前 1 天、前 30 分钟各提醒一次
+-- 比赛进行中：一张可原地更新的比分卡片；每张图打完单独推送；结束时推送胜者
++- 比赛进行中：一张可原地更新的比分卡片；每张图打完单独推送；结束时推送胜者（大比分分出胜负就算结束，不等 bo3 改状态）
+ - 每天 **UTC 0 点**发今日赛程并自动置顶，第二天替换；没有比赛时告诉你下一场是什么
+ - 消息里带队伍国旗、世界排名、赛事奖金、LAN / ONLINE、星级、bo3 的 AI 预测和每张图的比分，以及赛段（如 [decider / 3rd place](https://bo3.gg/tournaments/esl-pro-league-season-24#tab-stages)，链接到 bo3 的赛段页）
+ - **斗鱼主播开播**提醒（断流 10 分钟内重连不重复推）
+@@ -234,7 +234,8 @@ Framework preset 选 **None**，Build command **留空**，Build output director
+ 之后每次 `git push` 两边都会自动更新。
+ 
+ - 页面右上角 **配色按钮** 可选 19 套配色（与 1999 主题相同），记在浏览器本地。
+-- 一页看完：左栏「进行中 + 赛程」，右栏「主播 + 赛果」（宽屏时右栏跟随滚动），窄屏自动变成上下排列。顶部导航条点一下滚到对应分栏，右下角 TOP 按钮回到顶部。
++- 一页看完，从上到下：「赛果」（紧凑小卡，默认显示两行，可展开全部）→「直播」（斗鱼主播小条 + 进行中的比赛）→「赛程」。顶部导航条点一下滚到对应分栏，右下角 TOP 按钮回到顶部。
++- AI 预测挂在预测胜者队徽左上角（「AI 2:0」），比赛结束后猜中变绿、没猜中变红。
+ - 两队都未定（TBD vs TBD）的比赛不显示也不推送，对阵确定后自动出现。
+ - 右上角 **管理** → 输入管理密码（`.sabonner.env` 里的 `ADMIN_TOKEN`）后页面底部出现「管理」分栏：tier、队伍搜索订阅、斗鱼房间、TG 用户审批、立即刷新。密码只存在这个浏览器里。
+ - 临时指定别的 Worker：网址后加 `?api=https://xxx.workers.dev`。
+diff --git a/init.sh b/init.sh
+index c7b773b..13d094a 100755
+--- a/init.sh
++++ b/init.sh
+@@ -172,7 +172,8 @@ if (( RESET )) || [[ -z "$TG_TOKEN" || -z "$OWNER_ID" ]]; then
+     warn "应为纯数字"
+   done
+ fi
+-if (( RESET )) || [[ -z "$TG_WEBHOOK_SECRET" ]]; then TG_WEBHOOK_SECRET="$(rand)"; fi
++NEW_SECRET=0
++if (( RESET )) || [[ -z "$TG_WEBHOOK_SECRET" ]]; then TG_WEBHOOK_SECRET="$(rand)"; NEW_SECRET=1; fi
+ if (( RESET )) || [[ -z "$ADMIN_TOKEN" ]]; then ADMIN_TOKEN="$(rand)"; fi
+ save_env
+ 
+@@ -222,14 +223,27 @@ for i in $(seq 1 12); do
+   sleep 5
+ done
+ SETUP_OK=0
+-for i in 1 2 3 4 5; do
++for i in 1 2 3 4 5 6 7 8; do
+   res="$(curl -s "$WORKER_URL/setup?token=$ADMIN_TOKEN" || true)"
+   # 只要求 webhook 成功；命令菜单失败不影响使用
+   if grep -qE '"webhook":\{"ok":true' <<<"$res"; then SETUP_OK=1; break; fi
+-  sleep 4   # secret 刚设置，等新版本生效
++  # 前几次多半是 secret 刚设置、新版本还没生效；Telegram 偶尔解析不了 workers.dev 域名，多等一会儿
++  (( i > 1 )) && echo "  第 $i 次重试…"
++  sleep $(( i < 4 ? 4 : 10 ))
+ done
+-(( SETUP_OK )) || die "注册失败，Worker 返回：$res"
+-ok "webhook 已注册"
++if (( SETUP_OK )); then
++  ok "webhook 已注册"
++else
++  # 注册失败时 Telegram 会保留原来的 webhook。地址没变、secret 也没换的话，原来那个照样能用，不必中断
++  cur="$(curl -s "https://api.telegram.org/bot${TG_TOKEN}/getWebhookInfo" | sed 's#\\/#/#g' || true)"
++  if (( ! NEW_SECRET )) && grep -qF "\"url\":\"$WORKER_URL/tg\"" <<<"$cur"; then
++    warn "这次没能重新注册 webhook（Telegram：$(sed -E 's/.*"description":"([^"]*)".*/\1/' <<<"$res")）"
++    warn "不过之前注册的地址和 secret 都没变，bot 照常工作。想重试的话之后再运行一次 ./init.sh"
++  else
++    die "注册失败，Worker 返回：$res
++  Telegram 解析不了域名这类错误一般过几分钟就好，稍后重新运行 ./init.sh"
++  fi
++fi
+ if grep -q 'chat not found' <<<"$res"; then
+   warn "管理员命令菜单暂未设置：你还没给这个 bot 发过消息。发一次 /start 就会自动补上，不影响使用"
+ elif ! grep -qE '"ownerCommands":\{"ok":true' <<<"$res"; then
+diff --git a/web/app.css b/web/app.css
+index ce919ee..91d4587 100644
+--- a/web/app.css
++++ b/web/app.css
+@@ -469,17 +469,6 @@ input:focus { box-shadow: 3px 3px 0 var(--accent); }
+ }
+ .sec-head h2 { font-size: 1.35rem; }
+ 
+-.columns {
+-  display: grid;
+-  grid-template-columns: minmax(0, 1fr) 380px;
+-  gap: 2rem;
+-  align-items: start;
+-}
+-.col-side { position: sticky; top: 76px; max-height: calc(100vh - 92px); overflow-y: auto; padding: 0 10px 10px 0; scrollbar-width: thin; }
+-.col-main .grid { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+-.col-main .day-head h2 { font-size: 1rem; }
+-.col-main .day-head { border-bottom-width: 3px; }
+-
+ /* 进行中为空时的一条提示 */
+ .idle {
+   display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
+@@ -492,53 +481,121 @@ input:focus { box-shadow: 3px 3px 0 var(--accent); }
+ .idle a { text-decoration: none; }
+ .idle a:hover { text-decoration: underline; text-decoration-thickness: 2px; }
+ 
+-/* ---------- 侧栏紧凑列表 ---------- */
+-.mini {
+-  background: var(--card-bg);
+-  border: var(--border-width) solid var(--black);
+-  box-shadow: var(--shadow-offset) var(--shadow-offset) 0 var(--shadow);
+-  --line: color-mix(in srgb, var(--black) var(--line-mix), var(--white));
++/* ---------- 分栏标题右侧的小字 / 展开按钮 ---------- */
++.sec-note {
++  margin-left: auto;
++  display: flex; align-items: center; gap: 0.6rem;
++  font-size: 0.78rem; font-weight: 700; color: var(--text-muted);
+ }
+-.mini-row {
+-  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 0.6rem;
+-  padding: 0.6rem 0.85rem;
+-  border-bottom: 2px solid var(--line);
+-  text-decoration: none; color: inherit;
++.sec-more {
++  height: 28px; padding: 0 0.6rem;
++  font: 700 0.75rem 'Space Grotesk', sans-serif; letter-spacing: 0.04em;
++  background: var(--card-bg); color: var(--text);
++  border: 2px solid var(--black); box-shadow: 2px 2px 0 var(--shadow);
++  cursor: pointer;
+ }
+-.mini-row:last-child { border-bottom: none; }
+-a.mini-row:hover { background: var(--row-hover); }
+-.mini-main { min-width: 0; }
+-.mini-title { display: block; font-weight: 700; font-size: 0.88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+-.mini-sub { display: block; font-size: 0.72rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+-.mini-arrow { font-size: 0.8rem; color: var(--text-muted); }
+-.mini-empty { padding: 1rem; font-size: 0.82rem; color: var(--text-muted); text-align: center; }
++.sec-more:hover { background: var(--accent); color: var(--on-accent); }
++.sec-more:active { transform: translate(2px, 2px); box-shadow: none; }
+ 
++/* ---------- 赛果：紧凑小卡 ---------- */
++.res-grid {
++  display: grid;
++  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
++  gap: 0.9rem;
++}
++.res {
++  display: flex; flex-direction: column; gap: 0.3rem;
++  padding: 0.55rem 0.7rem 0.6rem;
++  background: var(--card-bg); color: inherit; text-decoration: none;
++  border: 3px solid var(--black);
++  box-shadow: 4px 4px 0 var(--shadow);
++  transition: transform 0.1s ease, box-shadow 0.1s ease;
++  min-width: 0;
++}
++.res[hidden] { display: none; }
++.res:hover { transform: translate(-2px, -2px); box-shadow: 6px 6px 0 var(--shadow); }
++.res-head {
++  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.4rem;
++  padding-bottom: 0.3rem; margin-bottom: 0.1rem;
++  border-bottom: 2px solid var(--line);
++  font-size: 0.68rem; color: var(--text-muted);
++}
++.tier.tier-sm { width: 18px; height: 18px; font-size: 0.6rem; border-width: 1.5px; }
++.res-tour { font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
++.res-when { font-weight: 700; white-space: nowrap; }
++.res-team { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 0.5rem; }
++.res-logo {
++  width: 22px; height: 22px;
++  display: flex; align-items: center; justify-content: center; overflow: hidden;
++  border: 1.5px solid var(--line); background: var(--white);
++  font: 400 0.5rem 'Archivo Black', sans-serif;
++}
++.res-logo img { width: 100%; height: 100%; object-fit: contain; padding: 1px; }
++.res-name {
++  display: flex; align-items: center; min-width: 0;
++  font-family: 'Twemoji Country Flags', 'Archivo Black', sans-serif; font-size: 0.85rem; text-transform: uppercase;
++  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
++}
++.res-name .flag { margin-right: 0.3rem; }
++.res-name .rank { margin-left: 0.35rem; font: 700 0.62rem 'Space Grotesk', sans-serif; color: var(--text-muted); }
++.res-name .ai-tag { margin-left: 0.4rem; flex-shrink: 0; }
++.res-name .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
++.res-name .flag, .res-name .rank { flex-shrink: 0; }
++.res-team.star .res-name::after { content: '★'; margin-left: 0.3rem; color: var(--accent-yellow); -webkit-text-stroke: 1px var(--black); }
++.res-s {
++  min-width: 1.6rem; height: 22px; padding: 0 0.3rem;
++  display: flex; align-items: center; justify-content: center;
++  font: 400 0.85rem 'Archivo Black', sans-serif;
++  border: 2px solid var(--black);
++}
++.res-team.win .res-s { background: var(--accent); color: var(--on-accent); }
++.res-team.lose .res-name, .res-team.lose .res-s { color: var(--text-muted); }
++.res-team.lose .res-logo { opacity: 0.55; }
++
++/* ---------- 主播：直播分栏顶部的小条 ---------- */
++.streamers { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1.25rem; }
++.streamer {
++  flex: 0 1 300px; min-width: 0;
++  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 0.6rem;
++  padding: 0.4rem 0.65rem 0.4rem 0.45rem;
++  background: var(--card-bg); color: inherit; text-decoration: none;
++  border: 3px solid var(--black);
++  box-shadow: 3px 3px 0 var(--shadow);
++  transition: transform 0.1s ease, box-shadow 0.1s ease;
++}
++.streamer:hover { transform: translate(-2px, -2px); box-shadow: 5px 5px 0 var(--shadow); }
++.streamer:not(.live) { border-style: dashed; box-shadow: none; }
++.streamer:not(.live) .st-name { color: var(--text-muted); }
+ .room-avatar {
+   position: relative;
+-  width: 40px; height: 40px; flex-shrink: 0;
++  width: 32px; height: 32px; flex-shrink: 0;
+   display: flex; align-items: center; justify-content: center;
+   border: 2px solid var(--black); background: var(--white);
+-  font-family: 'Archivo Black', sans-serif; font-size: 0.7rem;
++  font-family: 'Archivo Black', sans-serif; font-size: 0.6rem;
+ }
+ .room-avatar img { width: 100%; height: 100%; object-fit: cover; }
+-.room-row:not(.live) .room-avatar img { filter: grayscale(1); opacity: 0.6; }
++.streamer:not(.live) .room-avatar img { filter: grayscale(1); opacity: 0.6; }
+ .room-dot {
+-  position: absolute; right: -5px; bottom: -5px;
+-  width: 12px; height: 12px;
+-  border: 2px solid var(--black); background: var(--text-muted);
++  position: absolute; right: -4px; bottom: -4px;
++  width: 9px; height: 9px;
++  border: 1.5px solid var(--black); background: var(--text-muted);
++}
++.streamer.live .room-dot { animation: blink 1s step-end infinite; }
++.st-main { min-width: 0; display: flex; flex-direction: column; }
++.st-name {
++  display: flex; align-items: center; gap: 0.35rem;
++  font-weight: 700; font-size: 0.82rem;
++  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+ }
+-.mini-row.live .room-dot { animation: blink 1s step-end infinite; }
+-.room-row .room-sub { color: var(--text); font-size: 0.78rem; }
+-
+-.res-score {
+-  display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 0.5rem;
+-  font-family: 'Twemoji Country Flags', 'Archivo Black', sans-serif; font-size: 0.85rem; text-transform: uppercase;
++.st-sub { font-size: 0.7rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
++.live-tag {
++  flex-shrink: 0;
++  height: 13px; padding: 0 3px;
++  display: inline-flex; align-items: center;
++  font: 400 0.5rem/1 'Archivo Black', sans-serif; font-style: normal; letter-spacing: 0.06em;
++  background: var(--accent-red); color: #fff;
++  border: 1.5px solid var(--black);
+ }
+-.res-score .t1 { text-align: right; }
+-.res-score span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+-.res-score .lose { color: var(--text-muted); }
+-.res-score b { font-weight: 400; padding: 0.05rem 0.4rem; border: 2px solid var(--black); background: var(--accent); color: var(--on-accent); }
+-.res-date { font: 700 0.65rem 'Space Grotesk', sans-serif; letter-spacing: 0.06em; color: var(--text-muted); writing-mode: horizontal-tb; width: 2.6rem; }
+ 
+ /* ---------- 回到顶部 ---------- */
+ .to-top {
+@@ -562,27 +619,25 @@ a.mini-row:hover { background: var(--row-hover); }
+   .section.flash > .sec-head { animation: none; }
+ }
+ 
+-@media (max-width: 1100px) {
+-  .columns { grid-template-columns: 1fr; gap: 0; }
+-  .col-side { position: static; max-height: none; overflow: visible; padding: 0; }
+-}
+-
+-/* ---------- 赛事信息条 / 排名 / AI ---------- */
+-.card-meta {
+-  display: flex; flex-wrap: wrap; gap: 0.35rem;
+-  padding: 0.5rem 1rem;
+-  border-bottom: 3px solid var(--line);
++/* ---------- 头部第二行：赛段 · 奖金 · LAN · 星级 · HLTV ---------- */
++.tour-sub {
++  display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.55rem;
++  margin-top: 0.2rem;
++  font-size: 0.72rem; color: var(--text-muted);
+ }
+-.meta-item {
+-  display: inline-flex; align-items: center; height: 22px; padding: 0 0.4rem;
+-  border: 2px solid var(--black);
+-  font: 400 0.68rem 'Archivo Black', sans-serif; letter-spacing: 0.04em;
+-  text-decoration: none; color: var(--text);
++.tour-sub > * { flex-shrink: 0; }
++.tour-sub .tour-stage { display: inline; flex-shrink: 1; min-width: 0; max-width: 100%; }
++.tm-prize { font: 400 0.7rem 'Archivo Black', sans-serif; color: var(--text); }
++.tm-tag {
++  display: inline-flex; align-items: center; height: 15px; padding: 0 4px;
++  font: 400 0.55rem/1 'Archivo Black', sans-serif; letter-spacing: 0.06em;
++  border: 1.5px solid var(--black);
+ }
+-.meta-lan { background: var(--black); color: var(--white); }
+-.meta-online { border-style: dashed; color: var(--text-muted); }
+-a.meta-link:hover { background: var(--black); color: var(--white); }
+-.stars { letter-spacing: 0.02em; font-size: 0.8rem; line-height: 1; }
++.tm-lan { background: var(--black); color: var(--white); }
++.tm-online { border-style: dashed; color: var(--text-muted); }
++.tm-link { font: 700 0.66rem 'Space Grotesk', sans-serif; letter-spacing: 0.04em; color: var(--text-muted); text-decoration: none; }
++.tm-link:hover { color: var(--text); text-decoration: underline; text-decoration-thickness: 2px; }
++.stars { letter-spacing: 0.02em; font-size: 0.72rem; line-height: 1; }
+ .stars b { font-weight: 400; color: var(--accent-yellow); -webkit-text-stroke: 1px var(--black); }
+ .stars i { font-style: normal; color: color-mix(in srgb, var(--text-muted) 45%, transparent); }
+ 
+@@ -604,16 +659,10 @@ a.meta-link:hover { background: var(--black); color: var(--white); }
+ }
+ .team-logo .ai-tag { position: absolute; top: -8px; left: -8px; }
+ 
+-.ai-line {
+-  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+-  margin-top: 0.1rem; padding-top: 0.55rem;
+-  border-top: 2px dashed var(--line);
+-  font-size: 0.78rem; color: var(--text-muted);
+-}
+-.ai-line strong { color: var(--text); text-transform: uppercase; }
+-.ai-ok, .ai-miss { font-size: 0.72rem; padding: 0 0.3rem; border: 2px solid var(--black); }
+-.ai-ok { background: var(--accent-green); color: #000; }
+-.ai-miss { background: var(--accent-red); color: #fff; }
++.ai-tag span { margin-left: 2px; }
++.ai-tag.ai-ok { background: var(--accent-green); color: #000; }
++.ai-tag.ai-miss { background: var(--accent-red); color: #fff; }
++.ai-tag.ai-miss span { text-decoration: line-through; }
+ 
+ .star-toggles { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0.4rem; }
+ .star-toggles .chip-btn { font-size: 0.85rem; height: 40px; }
+@@ -629,6 +678,9 @@ a.meta-link:hover { background: var(--black); color: var(--white); }
+   .stat-label { font-size: 0.6rem; letter-spacing: 0.04em; }
+   .main { padding: 1rem; }
+   .grid, .admin { grid-template-columns: 1fr; gap: 1.1rem; }
++  .res-grid { grid-template-columns: 1fr; gap: 0.7rem; }
++  .streamer { flex-basis: 100%; }
++  .sec-note > span { display: none; }
+   .jumpbar-inner { padding: 0.5rem 1rem; }
+   .jump { height: 34px; padding: 0 0.65rem; font-size: 0.76rem; }
+   .section { scroll-margin-top: 64px; }
+diff --git a/web/app.js b/web/app.js
+index b2c281a..ea0cc79 100644
+--- a/web/app.js
++++ b/web/app.js
+@@ -62,6 +62,7 @@
+     data: null,
+     token: store.get('sabonner.token'),
+     admin: { users: null, search: [], q: '', busy: false },
++    resultsOpen: store.get('sabonner.resultsOpen') === '1',
+     error: null,
+   };
+ 
+@@ -112,7 +113,7 @@
+     }
+     const f = flag(cc);
+     return `<div class="${cls}">
+-      <span class="team-logo"${aiPick ? ' title="AI 预测胜者"' : ''}>${logo ? `<img src="${esc(logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}${aiPick ? '<i class="ai-tag">AI</i>' : ''}</span>
++      <span class="team-logo">${logo ? `<img src="${esc(logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}${aiPick ? aiTag(m, side) : ''}</span>
+       <span class="team-name" title="${esc(name)}${rank ? ` · 世界排名 #${rank}` : ''}">${f ? `<span class="flag">${f}</span>` : ''}${esc(name)}${rank ? `<span class="rank">#${rank}</span>` : ''}</span>
+       ${showScore ? `<span class="team-score">${score ?? 0}</span>` : ''}
+     </div>`;
+@@ -140,33 +141,37 @@
+   const fmtPrize = (n) => (!n ? '' : n >= 1e6 ? `$${+(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `$${+(n / 1e3).toFixed(1)}K` : `$${n}`);
+   const starRow = (n) => `<span class="stars" title="bo3 星级 ${n}/5">${'<b>★</b>'.repeat(n)}${'<i>★</i>'.repeat(5 - n)}</span>`;
+ 
+-  function metaStrip(m) {
+-    const parts = [];
+-    if (m.prize) parts.push(`<span class="meta-item">${fmtPrize(m.prize)}</span>`);
+-    if (m.event_type === 'lan') parts.push('<span class="meta-item meta-lan">LAN</span>');
+-    else if (m.event_type === 'online') parts.push('<span class="meta-item meta-online">ONLINE</span>');
+-    if (m.stars != null) parts.push(`<span class="meta-item">${starRow(m.stars)}</span>`);
+-    if (m.tournament_hltv) parts.push(`<a class="meta-item meta-link" href="${esc(m.tournament_hltv)}" target="_blank" rel="noopener" title="HLTV 赛事页">HLTV ↗</a>`);
+-    return parts.length ? `<div class="card-meta">${parts.join('')}</div>` : '';
++  // AI 预测：挂在预测胜者队徽左上角的小标「AI 2:0」（比分按预测胜者的视角）；
++  // 比赛结束后猜中变绿、没猜中变红并划掉
++  function aiVerdict(m) {
++    if (!m.ai || m.status !== 'finished') return null;
++    const w = m.winner_id || (m.s1 !== m.s2 ? (m.s1 > m.s2 ? m.team1_id : m.team2_id) : null);
++    return w ? w === m.ai.winner_id : null;
+   }
+-
+-  function aiLine(m) {
+-    if (!m.ai) return '';
+-    const side = m.ai.winner_id === m.team1_id ? 1 : m.ai.winner_id === m.team2_id ? 2 : 0;
+-    if (!side) return '';
++  function aiTag(m, side) {
++    const sc = m.ai.s1 != null && m.ai.s2 != null ? (side === 1 ? `${m.ai.s1}:${m.ai.s2}` : `${m.ai.s2}:${m.ai.s1}`) : '';
++    const v = aiVerdict(m);
+     const name = side === 1 ? m.team1 : m.team2;
+-    // 比分从预测胜者的角度写：「SPIRIT 2:0」
+-    const score = m.ai.s1 != null && m.ai.s2 != null ? ` ${side === 1 ? `${m.ai.s1}:${m.ai.s2}` : `${m.ai.s2}:${m.ai.s1}`}` : '';
+-    let verdict = '';
+-    if (m.status === 'finished' && m.winner_id) verdict = m.winner_id === m.ai.winner_id ? '<b class="ai-ok">✓ 猜中</b>' : '<b class="ai-miss">✗ 没猜中</b>';
+-    return `<div class="ai-line"><i class="ai-tag">AI</i><span>预测 <strong>${esc(name)}</strong>${score}</span>${verdict}</div>`;
++    const tip = `AI 预测 ${name}${sc ? ' ' + sc : ''} 胜${v === true ? ' · 猜中' : v === false ? ' · 没猜中' : ''}`;
++    return `<i class="ai-tag${v === true ? ' ai-ok' : v === false ? ' ai-miss' : ''}" title="${esc(tip)}">AI${sc ? `<span>${sc}</span>` : ''}</i>`;
++  }
++
++  // 头部第二行：赛段 · 奖金 · LAN · 星级 · HLTV
++  function tourSub(m) {
++    const parts = [];
++    if (m.stage) parts.push(m.stage_url
++      ? `<a class="tour-stage" href="${esc(m.stage_url)}" target="_blank" rel="noopener">${esc(m.stage)}</a>`
++      : `<span class="tour-stage">${esc(m.stage)}</span>`);
++    if (m.prize) parts.push(`<span class="tm-prize" title="总奖金">${fmtPrize(m.prize)}</span>`);
++    if (m.event_type === 'lan') parts.push('<span class="tm-tag tm-lan" title="线下赛">LAN</span>');
++    else if (m.event_type === 'online') parts.push('<span class="tm-tag tm-online" title="线上赛">ONLINE</span>');
++    if (m.stars) parts.push(starRow(m.stars));
++    if (m.tournament_hltv) parts.push(`<a class="tm-link" href="${esc(m.tournament_hltv)}" target="_blank" rel="noopener" title="HLTV 赛事页">HLTV↗</a>`);
++    return parts.length ? `<span class="tour-sub">${parts.join('')}</span>` : '';
+   }
+ 
+   function matchCard(m, stars) {
+     const tier = String(m.tier || '').toLowerCase();
+-    const stage = m.stage
+-      ? (m.stage_url ? `<a class="tour-stage" href="${esc(m.stage_url)}" target="_blank" rel="noopener">${esc(m.stage)}</a>` : `<span class="tour-stage">${esc(m.stage)}</span>`)
+-      : '';
+     const t = nowSec();
+     let when;
+     if (m.status === 'current') when = `<span class="when-time">${clock(m.start)}</span><span class="countdown">已开赛 ${dur(t - m.start)}</span>`;
+@@ -178,11 +183,10 @@
+       ${m.status === 'current' ? '<div class="live-band"><span class="live-dot"></span>LIVE</div>' : ''}
+       <div class="card-top">
+         <span class="tier tier-${esc(tier)}" title="Tier ${esc(tier.toUpperCase())}">${esc(tier.toUpperCase() || '?')}</span>
+-        <span class="tour"><span class="tour-name" title="${esc(m.tournament)}">${esc(m.tournament || '未知赛事')}</span>${stage}</span>
++        <span class="tour"><span class="tour-name" title="${esc(m.tournament)}">${esc(m.tournament || '未知赛事')}</span>${tourSub(m)}</span>
+         <span class="bo">BO${m.bo}</span>
+       </div>
+-      ${metaStrip(m)}
+-      <div class="teams">${teamRow(m, 1, stars)}${teamRow(m, 2, stars)}${aiLine(m)}</div>
++      <div class="teams">${teamRow(m, 1, stars)}${teamRow(m, 2, stars)}</div>
+       ${mapRows(m)}
+       <div class="card-foot"><span class="when">${when}</span><a class="ext" href="${esc(m.url)}" target="_blank" rel="noopener">bo3.gg ↗</a></div>
+     </article>`;
+@@ -209,42 +213,72 @@
+ 
+   const empty = (title, text) => `<div class="empty"><h2>${esc(title)}</h2><p>${esc(text)}</p></div>`;
+ 
+-  function roomList(rooms) {
+-    if (!rooms.length) return '<div class="mini"><p class="mini-empty">管理员还没有添加斗鱼房间</p></div>';
++  // 主播：紧凑小条，在播的排前面；放在「直播」分栏顶部
++  function streamerStrip(rooms) {
++    if (!rooms.length) return '';
+     const sorted = [...rooms].sort((a, b) => Number(b.live) - Number(a.live));
+     const t = nowSec();
+-    return `<div class="mini">${sorted.map((r) => {
++    return `<div class="streamers">${sorted.map((r) => {
+       const name = r.owner || `斗鱼 ${r.room_id}`;
+       const since = r.live
+         ? (r.show_time ? `已播 ${dur(t - r.show_time)}` : '直播中')
+         : (r.changed_at ? `${dur(t - r.changed_at)}前下播` : '未开播');
+-      const meta = [r.category, since, r.room_id].filter(Boolean).map(esc).join(' · ');
+-      return `<a class="mini-row room-row ${r.live ? 'live' : ''}" href="https://www.douyu.com/${esc(r.room_id)}" target="_blank" rel="noopener" title="${esc(r.title || '')}">
++      const sub = [r.live ? r.title : '', r.category, since].filter(Boolean).map(esc).join(' · ');
++      return `<a class="streamer${r.live ? ' live' : ''}" href="https://www.douyu.com/${esc(r.room_id)}" target="_blank" rel="noopener" title="${esc(`${name}${r.title ? ' · ' + r.title : ''} · 斗鱼 ${r.room_id}`)}">
+         <span class="room-avatar">${r.avatar ? `<img src="${esc(r.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}<i class="room-dot" aria-hidden="true"></i></span>
+-        <span class="mini-main"><span class="mini-title">${esc(name)}${r.live ? ' <span class="badge badge-live">LIVE</span>' : ''}</span>
+-          ${r.title ? `<span class="mini-sub room-sub">${esc(r.title)}</span>` : ''}
+-          <span class="mini-sub">${meta}</span></span>
+-        <span class="mini-arrow">↗</span></a>`;
++        <span class="st-main"><span class="st-name">${esc(name)}${r.live ? '<i class="live-tag">LIVE</i>' : ''}</span><span class="st-sub">${sub}</span></span>
++      </a>`;
+     }).join('')}</div>`;
+   }
+ 
+-  function resultList(list) {
+-    if (!list.length) return '<div class="mini"><p class="mini-empty">最近 7 天没有已结束的比赛</p></div>';
++  // 赛果：紧凑小卡网格，默认只显示前两行，可展开
++  function resultTile(m, stars) {
++    const w1 = m.winner_id ? m.winner_id === m.team1_id : m.s1 > m.s2;
++    const v = aiVerdict(m);
++    const row = (side) => {
++      const id = side === 1 ? m.team1_id : m.team2_id;
++      const name = side === 1 ? m.team1 : m.team2;
++      const logo = side === 1 ? m.team1_logo : m.team2_logo;
++      const f = flag(side === 1 ? m.team1_cc : m.team2_cc);
++      const rank = side === 1 ? m.team1_rank : m.team2_rank;
++      const won = side === 1 ? w1 : !w1;
++      const ai = m.ai && m.ai.winner_id === id && v != null
++        ? `<i class="ai-tag ${v ? 'ai-ok' : 'ai-miss'}" title="AI 预测 ${esc(name)} 胜 · ${v ? '猜中' : '没猜中'}">AI${v ? '✓' : '✗'}</i>` : '';
++      return `<span class="res-team${won ? ' win' : ' lose'}${stars.has(id) ? ' star' : ''}">
++        <span class="res-logo">${logo ? `<img src="${esc(logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}</span>
++        <span class="res-name">${f ? `<span class="flag">${f}</span>` : ''}<span class="nm">${esc(name)}</span>${rank ? `<span class="rank">#${rank}</span>` : ''}${ai}</span>
++        <b class="res-s">${side === 1 ? m.s1 : m.s2}</b></span>`;
++    };
++    const tier = String(m.tier || '').toLowerCase();
++    const lbl = dayLabel(m.start);
++    return `<a class="res" href="${esc(m.url)}" target="_blank" rel="noopener" title="${esc(m.tournament)}${m.stage ? ' · ' + esc(m.stage) : ''}">
++      <span class="res-head"><span class="tier tier-sm tier-${esc(tier)}">${esc(tier.toUpperCase() || '?')}</span>
++        <span class="res-tour">${esc(m.tournament || '')}${m.stage ? ` · ${esc(m.stage)}` : ''}</span>
++        <span class="res-when">${esc(lbl.rel || lbl.main.split(' ')[0])} ${clock(m.start)}</span></span>
++      ${row(1)}${row(2)}
++    </a>`;
++  }
++
++  function resultGrid(list) {
++    if (!list.length) return '<div class="idle">最近 7 天没有已结束的比赛</div>';
+     const stars = subTeamIds();
+-    return `<div class="mini">${list.map((m) => {
+-      const w1 = m.winner_id ? m.winner_id === m.team1_id : m.s1 > m.s2;
+-      const name = (side) => {
+-        const f = flag(side === 1 ? m.team1_cc : m.team2_cc);
+-        const id = side === 1 ? m.team1_id : m.team2_id;
+-        return `${f ? f + ' ' : ''}${esc(side === 1 ? m.team1 : m.team2)}${stars.has(id) ? ' ★' : ''}`;
+-      };
+-      const lbl = dayLabel(m.start);
+-      return `<a class="mini-row" href="${esc(m.url)}" target="_blank" rel="noopener" title="${esc(m.tournament)}${m.stage ? ' · ' + esc(m.stage) : ''}">
+-        <span class="res-date">${esc(lbl.rel || lbl.main.split(' ')[0])}</span>
+-        <span class="mini-main"><span class="res-score"><span class="t1 ${w1 ? '' : 'lose'}">${name(1)}</span><b>${m.s1}:${m.s2}</b><span class="${w1 ? 'lose' : ''}">${name(2)}</span></span>
+-          <span class="mini-sub">${esc(String(m.tier || '').toUpperCase())} · ${esc(m.tournament)}${m.stage ? ' · ' + esc(m.stage) : ''}${m.ai && m.winner_id ? (m.ai.winner_id === m.winner_id ? ' · AI ✓' : ' · AI ✗') : ''}</span></span>
+-        <span class="mini-arrow">↗</span></a>`;
+-    }).join('')}</div>`;
++    return `<div class="res-grid${state.resultsOpen ? '' : ' collapsed'}" id="res-grid">${list.map((m) => resultTile(m, stars)).join('')}</div>`;
++  }
++
++  // 收起时只留两行（手机上一列时留三行），按当前列数算
++  function clampResults() {
++    const grid = document.getElementById('res-grid');
++    const btn = document.getElementById('res-more');
++    if (!grid) { if (btn) btn.hidden = true; return; }
++    const cols = getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length || 1;
++    const keep = cols === 1 ? 3 : cols * 2;
++    const tiles = grid.children;
++    for (let i = 0; i < tiles.length; i++) tiles[i].hidden = !state.resultsOpen && i >= keep;
++    if (btn) {
++      btn.hidden = tiles.length <= keep;
++      btn.textContent = state.resultsOpen ? '收起 ↑' : `全部 ${tiles.length} 场 ↓`;
++      btn.setAttribute('aria-expanded', String(state.resultsOpen));
++    }
+   }
+ 
+   // 进行中为空时：一行提示 + 下一场
+@@ -333,7 +367,7 @@
+     $('#btn-admin-label').textContent = admin ? '已登录' : '管理';
+ 
+     if (!d) {
+-      if (state.error) $('#live-body').innerHTML = empty('连不上服务', state.error);
++      if (state.error) $('#results-body').innerHTML = empty('连不上服务', state.error);
+       return;
+     }
+ 
+@@ -350,13 +384,14 @@
+     $('#st-week').textContent = upcoming.filter((m) => m.start < t + 7 * 86400).length;
+     $('#st-rooms').textContent = `${roomsLive}/${d.rooms.length}`;
+     const setCount = (id, n, hot) => { const el = $(id); el.textContent = n || ''; el.classList.toggle('hot', !!hot && n > 0); };
+-    setCount('#jc-live', live.length, true);
++    setCount('#jc-results', results.length);
++    setCount('#jc-live', live.length + roomsLive, true);
+     setCount('#jc-upcoming', upcoming.length);
+-    setCount('#jc-rooms', roomsLive, true);
+     $('#sc-live').textContent = live.length || '';
++    $('#sn-live').textContent = [live.length ? `${live.length} 场比赛` : '', d.rooms.length ? `主播 ${roomsLive}/${d.rooms.length} 在播` : ''].filter(Boolean).join(' · ');
+     $('#sc-upcoming').textContent = upcoming.length || '';
+-    $('#sc-rooms').textContent = d.rooms.length ? `${roomsLive}/${d.rooms.length}` : '';
+     $('#sc-results').textContent = results.length || '';
++    $('#sn-results').innerHTML = results.length ? '<span>最近 7 天</span><button class="sec-more" id="res-more" type="button" aria-controls="res-grid" hidden></button>' : '';
+     $('#updated').textContent = d.last_refresh ? `赛程更新于 ${dur(t - d.last_refresh)}前` : '';
+ 
+     // 订阅条
+@@ -369,12 +404,13 @@
+ 
+     const stars = subTeamIds();
+     keepFocus(() => {
+-      $('#live-body').innerHTML = live.length ? `<div class="grid">${live.map((m) => matchCard(m, stars)).join('')}</div>` : idleLine(upcoming);
++      $('#results-body').innerHTML = resultGrid(results);
++      $('#live-body').innerHTML = streamerStrip(d.rooms)
++        + (live.length ? `<div class="grid">${live.map((m) => matchCard(m, stars)).join('')}</div>` : idleLine(upcoming));
+       $('#upcoming-body').innerHTML = grouped(upcoming) || empty('暂无赛程', '订阅范围内 7 天内没有比赛');
+-      $('#rooms-body').innerHTML = roomList(d.rooms);
+-      $('#results-body').innerHTML = resultList(results);
+       if (admin) $('#admin-body').innerHTML = adminPanel();
+     });
++    clampResults();
+     updateCurrent();
+   }
+ 
+@@ -399,17 +435,14 @@
+     if (pinned && Date.now() < pinned.until) return;
+     pinned = null;
+     const bar = $('#jumpbar').getBoundingClientRect().bottom + 24;
+-    // 宽屏时侧栏吸顶、一直在视野里，不参与高亮判断（否则滚赛程时会一直亮「主播」）
+-    const sideSticky = getComputedStyle($('.col-side')).position === 'sticky';
+     let cur = null;
+     for (const b of document.querySelectorAll('.jump')) {
+       const sec = document.getElementById(b.dataset.jump);
+       if (!sec || sec.hidden) continue;
+-      if (sideSticky && sec.closest('.col-side')) continue;
+       const r = sec.getBoundingClientRect();
+       if (r.top <= bar && r.bottom > bar) cur = b.dataset.jump;
+     }
+-    if (!cur && window.scrollY < 10) cur = 'sec-live'; // 在页面顶部时高亮第一个
++    if (!cur && window.scrollY < 10) cur = 'sec-results'; // 在页面顶部时高亮第一个
+     if (!cur) {
+       const atBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4;
+       if (atBottom) cur = [...document.querySelectorAll('.jump')].filter((b) => !b.hidden).pop()?.dataset.jump;
+@@ -422,7 +455,7 @@
+     ticking = true;
+     requestAnimationFrame(() => { updateCurrent(); ticking = false; });
+   }, { passive: true });
+-  window.addEventListener('resize', updateCurrent);
++  window.addEventListener('resize', () => { clampResults(); updateCurrent(); });
+   $('#to-top').addEventListener('click', () => {
+     window.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
+     $('#header').querySelector('.logo').focus({ preventScroll: true });
+@@ -486,6 +519,14 @@
+       jumpTo(jumpBtn.dataset.jump);
+       return;
+     }
++    if (e.target.closest('#res-more')) {
++      state.resultsOpen = !state.resultsOpen;
++      store.set('sabonner.resultsOpen', state.resultsOpen ? '1' : null);
++      $('#res-grid')?.classList.toggle('collapsed', !state.resultsOpen);
++      clampResults();
++      if (!state.resultsOpen) jumpTo('sec-results'); // 收起后回到赛果顶部，不让页面停在半空
++      return;
++    }
+     const btn = e.target.closest('[data-act]');
+     if (!btn) return;
+     const id = btn.dataset.id;
+diff --git a/web/index.html b/web/index.html
+index f78745a..cf57b32 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -35,17 +35,16 @@
+       <button class="stat-item" type="button" data-jump="sec-live"><span class="stat-value" id="st-live">–</span><span class="stat-label">进行中</span></button>
+       <button class="stat-item" type="button" data-jump="sec-upcoming"><span class="stat-value" id="st-today">–</span><span class="stat-label">今日比赛</span></button>
+       <button class="stat-item" type="button" data-jump="sec-upcoming"><span class="stat-value" id="st-week">–</span><span class="stat-label">7 天内</span></button>
+-      <button class="stat-item" type="button" data-jump="sec-rooms"><span class="stat-value" id="st-rooms">–</span><span class="stat-label">主播在播</span></button>
++      <button class="stat-item" type="button" data-jump="sec-live"><span class="stat-value" id="st-rooms">–</span><span class="stat-label">主播在播</span></button>
+     </div>
+   </header>
+ 
+   <!-- 吸顶导航：点击滚动到对应分栏并聚焦，滚动时高亮当前分栏 -->
+   <nav class="jumpbar" id="jumpbar" aria-label="页面分栏">
+     <div class="jumpbar-inner">
+-      <button class="jump" type="button" data-jump="sec-live">进行中 <span class="jump-count" id="jc-live"></span></button>
++      <button class="jump" type="button" data-jump="sec-results">赛果 <span class="jump-count" id="jc-results"></span></button>
++      <button class="jump" type="button" data-jump="sec-live">直播 <span class="jump-count" id="jc-live"></span></button>
+       <button class="jump" type="button" data-jump="sec-upcoming">赛程 <span class="jump-count" id="jc-upcoming"></span></button>
+-      <button class="jump" type="button" data-jump="sec-rooms">主播 <span class="jump-count" id="jc-rooms"></span></button>
+-      <button class="jump" type="button" data-jump="sec-results">赛果</button>
+       <button class="jump" type="button" data-jump="sec-admin" id="jump-admin" hidden>管理</button>
+     </div>
+   </nav>
+@@ -53,30 +52,21 @@
+   <main class="main">
+     <section class="subs" id="subs" aria-label="订阅"></section>
+ 
+-    <div class="columns">
+-      <div class="col-main">
+-        <section class="section" id="sec-live" tabindex="-1" aria-labelledby="h-live">
+-          <div class="sec-head"><h2 id="h-live">进行中</h2><span class="sec-count" id="sc-live"></span></div>
+-          <div id="live-body"><div class="loading"><div class="loading-panel"><span class="pixel-loader" aria-hidden="true"><i></i><i></i><i></i></span>LOADING</div></div></div>
+-        </section>
++    <!-- 从上到下：赛果（紧凑网格）→ 直播（主播 + 进行中的比赛）→ 赛程 → 管理 -->
++    <section class="section" id="sec-results" tabindex="-1" aria-labelledby="h-results">
++      <div class="sec-head"><h2 id="h-results">赛果</h2><span class="sec-count" id="sc-results"></span><span class="sec-note" id="sn-results"></span></div>
++      <div id="results-body"><div class="loading"><div class="loading-panel"><span class="pixel-loader" aria-hidden="true"><i></i><i></i><i></i></span>LOADING</div></div></div>
++    </section>
+ 
+-        <section class="section" id="sec-upcoming" tabindex="-1" aria-labelledby="h-upcoming">
+-          <div class="sec-head"><h2 id="h-upcoming">赛程</h2><span class="sec-count" id="sc-upcoming"></span></div>
+-          <div id="upcoming-body"></div>
+-        </section>
+-      </div>
++    <section class="section" id="sec-live" tabindex="-1" aria-labelledby="h-live">
++      <div class="sec-head"><h2 id="h-live">直播</h2><span class="sec-count" id="sc-live"></span><span class="sec-note" id="sn-live"></span></div>
++      <div id="live-body"></div>
++    </section>
+ 
+-      <aside class="col-side">
+-        <section class="section" id="sec-rooms" tabindex="-1" aria-labelledby="h-rooms">
+-          <div class="sec-head"><h2 id="h-rooms">主播</h2><span class="sec-count" id="sc-rooms"></span></div>
+-          <div id="rooms-body"></div>
+-        </section>
+-        <section class="section" id="sec-results" tabindex="-1" aria-labelledby="h-results">
+-          <div class="sec-head"><h2 id="h-results">赛果</h2><span class="sec-count" id="sc-results"></span></div>
+-          <div id="results-body"></div>
+-        </section>
+-      </aside>
+-    </div>
++    <section class="section" id="sec-upcoming" tabindex="-1" aria-labelledby="h-upcoming">
++      <div class="sec-head"><h2 id="h-upcoming">赛程</h2><span class="sec-count" id="sc-upcoming"></span></div>
++      <div id="upcoming-body"></div>
++    </section>
+ 
+     <section class="section" id="sec-admin" tabindex="-1" aria-labelledby="h-admin" hidden>
+       <div class="sec-head"><h2 id="h-admin">管理</h2></div>
+diff --git a/worker/src/engine.js b/worker/src/engine.js
+index be4a362..cf60296 100644
+--- a/worker/src/engine.js
++++ b/worker/src/engine.js
+@@ -165,6 +165,16 @@ export async function dailyTick(ctx) {
+ 
+ const TERMINAL = (s) => s !== 'upcoming' && s !== 'current';
+ 
++// 大比分已经分出胜负（BO3 有人拿到 2 图、BO2 打满 2 图……）。
++// bo3 在决胜图打完后往往要过好几分钟才把比赛标成 finished，这期间按比分直接判定结束，
++// 网页和 TG 不用跟着它一起「还在进行中」
++export function seriesDecided(m) {
++  const bo = Number(m.bo) || 0;
++  const s1 = Number(m.s1) || 0, s2 = Number(m.s2) || 0;
++  if (!bo) return false;
++  return Math.max(s1, s2) > bo / 2 || s1 + s2 >= bo;
++}
++
+ export async function liveTick(ctx, minute) {
+   const db = ctx.env.DB;
+   const t = now();
+@@ -187,6 +197,13 @@ export async function liveTick(ctx, minute) {
+       continue;
+     }
+ 
++    // bo3 还标着进行中、但大比分已分出胜负：当作已结束（胜者按比分定）
++    // 等决胜图的比分也到了再判（否则结束消息里会少最后一张图）
++    const scored = (f.maps ?? old.maps ?? []).filter((g) => g.status === 'finished' && g.sc1 != null).length;
++    if (f.status === 'current' && seriesDecided(f) && scored >= (Number(f.s1) || 0) + (Number(f.s2) || 0)) {
++      f.status = 'finished';
++      if (!f.winner_id && f.s1 !== f.s2) f.winner_id = f.s1 > f.s2 ? f.team1_id : f.team2_id;
++    }
+     const live = f.status === 'current';
+     const done = TERMINAL(f.status);
+     const m = { ...old, ...f, maps: f.maps ?? old.maps }; // 地图数据随比赛一起返回
+diff --git a/worker/src/format.js b/worker/src/format.js
+index 14e7a8c..5dfdd98 100644
+--- a/worker/src/format.js
++++ b/worker/src/format.js
+@@ -7,13 +7,21 @@ import { roomUrl } from './douyu.js';
+ const CIRCLED = ['⓪', '①', '②', '③', '④', '⑤', '⑥', '⑦'];
+ 
+ // "🇷🇺 <b>Spirit</b> #1"；stars：订阅队伍 id 集合，命中时前面加 ⭐
++// ai：AI 预测胜者的标记，不再单独占一行
++//   false 不标；true 只标 🤖（列表里用）；'score' 带预测比分「🤖2:0」；'verdict' 结束后再带 ✅/❌
++const aiScore = (m, side) => (m.ai_s1 != null && m.ai_s2 != null ? (side === 1 ? `${m.ai_s1}:${m.ai_s2}` : `${m.ai_s2}:${m.ai_s1}`) : '');
+ const teamTag = (m, side, stars, ai = false) => {
+   const name = side === 1 ? m.team1 : m.team2;
+   const id = side === 1 ? m.team1_id : m.team2_id;
+   const f = flag(side === 1 ? m.team1_cc : m.team2_cc);
+   const rank = side === 1 ? m.team1_rank : m.team2_rank;
+-  const aiPick = ai && m.ai_winner_id && m.ai_winner_id === id ? ' 🤖' : '';
+-  return `${stars?.has(id) ? '⭐' : ''}${f ? f + ' ' : ''}<b>${esc(name)}</b>${rank ? ` #${rank}` : ''}${aiPick}`;
++  let mark = '';
++  if (ai && m.ai_winner_id && m.ai_winner_id === id) {
++    mark = ' 🤖';
++    if (ai !== true) mark += aiScore(m, side);
++    if (ai === 'verdict' && m.winner_id) mark += m.winner_id === id ? '✅' : '❌';
++  }
++  return `${stars?.has(id) ? '⭐' : ''}${f ? f + ' ' : ''}<b>${esc(name)}</b>${rank ? ` #${rank}` : ''}${mark}`;
+ };
+ 
+ // $1,000,000 -> "$1M"，31500 -> "$31.5K"
+@@ -29,20 +37,8 @@ const starsText = (n) => (n > 0 ? '★'.repeat(n) : '');
+ // 赛事附加信息：奖金 · LAN · ★★★★
+ const extras = (m) => [fmtPrize(m.prize), EVENT[m.event_type] || '', starsText(m.stars)].filter(Boolean).join(' · ');
+ 
+-// AI 预测：「🤖 AI 预测 Spirit 2:0」；比赛结束后附上 ✅ / ❌
+-function aiLine(m, done = false) {
+-  if (!m.ai_winner_id) return '';
+-  const side = m.ai_winner_id === m.team1_id ? 1 : m.ai_winner_id === m.team2_id ? 2 : 0;
+-  if (!side) return '';
+-  const name = side === 1 ? m.team1 : m.team2;
+-  // 比分从预测胜者的角度写：「Spirit 2:0」
+-  const score = m.ai_s1 != null && m.ai_s2 != null ? ` ${side === 1 ? `${m.ai_s1}:${m.ai_s2}` : `${m.ai_s2}:${m.ai_s1}`}` : '';
+-  let verdict = '';
+-  if (done && m.winner_id) verdict = m.winner_id === m.ai_winner_id ? ' ✅' : ' ❌';
+-  return `🤖 AI 预测 <b>${esc(name)}</b>${score}${verdict}`;
+-}
+ const vs = (m, stars, ai = false) => `${teamTag(m, 1, stars, ai)} vs ${teamTag(m, 2, stars, ai)}`;
+-const score = (m) => `${teamTag(m, 1)}  ${m.s1} : ${m.s2}  ${teamTag(m, 2)}`;
++const score = (m, ai = false) => `${teamTag(m, 1, null, ai)}  ${m.s1} : ${m.s2}  ${teamTag(m, 2, null, ai)}`;
+ const link = (m) => `<a href="${matchUrl(m)}">bo3.gg</a>${m.tournament_hltv ? ` · <a href="${esc(m.tournament_hltv)}">HLTV 赛事页</a>` : ''}`;
+ 
+ // "decider / 3rd place"，链接到 bo3 赛事的赛段页
+@@ -74,14 +70,12 @@ export function mapLine(m, g) {
+ export function preMsg(m, tz) {
+   const left = m.start_ts - now();
+   const when = left <= 45 * 60 ? `⏰ ${fmtDur(left)}后开赛` : `📅 ${fmtDur(left)}后开赛`;
+-  return [when, head(m), `${vs(m)} · BO${m.bo}`, aiLine(m), `${fmtTime(m.start_ts, tz)}  ${link(m)}`].filter(Boolean).join('\n');
++  return [when, head(m), `${vs(m, null, 'score')} · BO${m.bo}`, `${fmtTime(m.start_ts, tz)}  ${link(m)}`].filter(Boolean).join('\n');
+ }
+ 
+ // 直播中的可编辑消息；finished=true 时变成结束版
+ export function liveCard(m, maps, finished = false) {
+-  const lines = [finished ? '🏁 已结束' : '🔴 LIVE', head(m), `${score(m)}  · BO${m.bo}`];
+-  const ai = aiLine(m, finished);
+-  if (ai) lines.push(ai);
++  const lines = [finished ? '🏁 已结束' : '🔴 LIVE', head(m), `${score(m, finished ? 'verdict' : 'score')}  · BO${m.bo}`];
+   for (const g of maps || []) {
+     if (finished && g.status !== 'finished') continue; // 结束后不再列没打的图
+     lines.push(mapLine(m, g));
+@@ -104,10 +98,9 @@ export function endMsg(m) {
+   return [
+     '🏆 比赛结束',
+     head(m),
+-    score(m),
++    score(m, 'verdict'),
+     side ? `胜者：${teamTag(m, side)}` : '',
+     ...(m.maps || []).filter((x) => x.status === 'finished' && x.sc1 != null).map((x) => mapLine(m, x)),
+-    aiLine(m, true),
+     link(m),
+   ].filter(Boolean).join('\n');
+ }

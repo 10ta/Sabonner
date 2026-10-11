@@ -7,13 +7,21 @@ import { roomUrl } from './douyu.js';
 const CIRCLED = ['⓪', '①', '②', '③', '④', '⑤', '⑥', '⑦'];
 
 // "🇷🇺 <b>Spirit</b> #1"；stars：订阅队伍 id 集合，命中时前面加 ⭐
+// ai：AI 预测胜者的标记，不再单独占一行
+//   false 不标；true 只标 🤖（列表里用）；'score' 带预测比分「🤖2:0」；'verdict' 结束后再带 ✅/❌
+const aiScore = (m, side) => (m.ai_s1 != null && m.ai_s2 != null ? (side === 1 ? `${m.ai_s1}:${m.ai_s2}` : `${m.ai_s2}:${m.ai_s1}`) : '');
 const teamTag = (m, side, stars, ai = false) => {
   const name = side === 1 ? m.team1 : m.team2;
   const id = side === 1 ? m.team1_id : m.team2_id;
   const f = flag(side === 1 ? m.team1_cc : m.team2_cc);
   const rank = side === 1 ? m.team1_rank : m.team2_rank;
-  const aiPick = ai && m.ai_winner_id && m.ai_winner_id === id ? ' 🤖' : '';
-  return `${stars?.has(id) ? '⭐' : ''}${f ? f + ' ' : ''}<b>${esc(name)}</b>${rank ? ` #${rank}` : ''}${aiPick}`;
+  let mark = '';
+  if (ai && m.ai_winner_id && m.ai_winner_id === id) {
+    mark = ' 🤖';
+    if (ai !== true) mark += aiScore(m, side);
+    if (ai === 'verdict' && m.winner_id) mark += m.winner_id === id ? '✅' : '❌';
+  }
+  return `${stars?.has(id) ? '⭐' : ''}${f ? f + ' ' : ''}<b>${esc(name)}</b>${rank ? ` #${rank}` : ''}${mark}`;
 };
 
 // $1,000,000 -> "$1M"，31500 -> "$31.5K"
@@ -29,20 +37,8 @@ const starsText = (n) => (n > 0 ? '★'.repeat(n) : '');
 // 赛事附加信息：奖金 · LAN · ★★★★
 const extras = (m) => [fmtPrize(m.prize), EVENT[m.event_type] || '', starsText(m.stars)].filter(Boolean).join(' · ');
 
-// AI 预测：「🤖 AI 预测 Spirit 2:0」；比赛结束后附上 ✅ / ❌
-function aiLine(m, done = false) {
-  if (!m.ai_winner_id) return '';
-  const side = m.ai_winner_id === m.team1_id ? 1 : m.ai_winner_id === m.team2_id ? 2 : 0;
-  if (!side) return '';
-  const name = side === 1 ? m.team1 : m.team2;
-  // 比分从预测胜者的角度写：「Spirit 2:0」
-  const score = m.ai_s1 != null && m.ai_s2 != null ? ` ${side === 1 ? `${m.ai_s1}:${m.ai_s2}` : `${m.ai_s2}:${m.ai_s1}`}` : '';
-  let verdict = '';
-  if (done && m.winner_id) verdict = m.winner_id === m.ai_winner_id ? ' ✅' : ' ❌';
-  return `🤖 AI 预测 <b>${esc(name)}</b>${score}${verdict}`;
-}
 const vs = (m, stars, ai = false) => `${teamTag(m, 1, stars, ai)} vs ${teamTag(m, 2, stars, ai)}`;
-const score = (m) => `${teamTag(m, 1)}  ${m.s1} : ${m.s2}  ${teamTag(m, 2)}`;
+const score = (m, ai = false) => `${teamTag(m, 1, null, ai)}  ${m.s1} : ${m.s2}  ${teamTag(m, 2, null, ai)}`;
 const link = (m) => `<a href="${matchUrl(m)}">bo3.gg</a>${m.tournament_hltv ? ` · <a href="${esc(m.tournament_hltv)}">HLTV 赛事页</a>` : ''}`;
 
 // "decider / 3rd place"，链接到 bo3 赛事的赛段页
@@ -74,14 +70,12 @@ export function mapLine(m, g) {
 export function preMsg(m, tz) {
   const left = m.start_ts - now();
   const when = left <= 45 * 60 ? `⏰ ${fmtDur(left)}后开赛` : `📅 ${fmtDur(left)}后开赛`;
-  return [when, head(m), `${vs(m)} · BO${m.bo}`, aiLine(m), `${fmtTime(m.start_ts, tz)}  ${link(m)}`].filter(Boolean).join('\n');
+  return [when, head(m), `${vs(m, null, 'score')} · BO${m.bo}`, `${fmtTime(m.start_ts, tz)}  ${link(m)}`].filter(Boolean).join('\n');
 }
 
 // 直播中的可编辑消息；finished=true 时变成结束版
 export function liveCard(m, maps, finished = false) {
-  const lines = [finished ? '🏁 已结束' : '🔴 LIVE', head(m), `${score(m)}  · BO${m.bo}`];
-  const ai = aiLine(m, finished);
-  if (ai) lines.push(ai);
+  const lines = [finished ? '🏁 已结束' : '🔴 LIVE', head(m), `${score(m, finished ? 'verdict' : 'score')}  · BO${m.bo}`];
   for (const g of maps || []) {
     if (finished && g.status !== 'finished') continue; // 结束后不再列没打的图
     lines.push(mapLine(m, g));
@@ -104,10 +98,9 @@ export function endMsg(m) {
   return [
     '🏆 比赛结束',
     head(m),
-    score(m),
+    score(m, 'verdict'),
     side ? `胜者：${teamTag(m, side)}` : '',
     ...(m.maps || []).filter((x) => x.status === 'finished' && x.sc1 != null).map((x) => mapLine(m, x)),
-    aiLine(m, true),
     link(m),
   ].filter(Boolean).join('\n');
 }

@@ -165,6 +165,16 @@ export async function dailyTick(ctx) {
 
 const TERMINAL = (s) => s !== 'upcoming' && s !== 'current';
 
+// 大比分已经分出胜负（BO3 有人拿到 2 图、BO2 打满 2 图……）。
+// bo3 在决胜图打完后往往要过好几分钟才把比赛标成 finished，这期间按比分直接判定结束，
+// 网页和 TG 不用跟着它一起「还在进行中」
+export function seriesDecided(m) {
+  const bo = Number(m.bo) || 0;
+  const s1 = Number(m.s1) || 0, s2 = Number(m.s2) || 0;
+  if (!bo) return false;
+  return Math.max(s1, s2) > bo / 2 || s1 + s2 >= bo;
+}
+
 export async function liveTick(ctx, minute) {
   const db = ctx.env.DB;
   const t = now();
@@ -187,6 +197,13 @@ export async function liveTick(ctx, minute) {
       continue;
     }
 
+    // bo3 还标着进行中、但大比分已分出胜负：当作已结束（胜者按比分定）
+    // 等决胜图的比分也到了再判（否则结束消息里会少最后一张图）
+    const scored = (f.maps ?? old.maps ?? []).filter((g) => g.status === 'finished' && g.sc1 != null).length;
+    if (f.status === 'current' && seriesDecided(f) && scored >= (Number(f.s1) || 0) + (Number(f.s2) || 0)) {
+      f.status = 'finished';
+      if (!f.winner_id && f.s1 !== f.s2) f.winner_id = f.s1 > f.s2 ? f.team1_id : f.team2_id;
+    }
     const live = f.status === 'current';
     const done = TERMINAL(f.status);
     const m = { ...old, ...f, maps: f.maps ?? old.maps }; // 地图数据随比赛一起返回

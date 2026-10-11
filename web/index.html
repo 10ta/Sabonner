@@ -35,17 +35,16 @@
       <button class="stat-item" type="button" data-jump="sec-live"><span class="stat-value" id="st-live">–</span><span class="stat-label">进行中</span></button>
       <button class="stat-item" type="button" data-jump="sec-upcoming"><span class="stat-value" id="st-today">–</span><span class="stat-label">今日比赛</span></button>
       <button class="stat-item" type="button" data-jump="sec-upcoming"><span class="stat-value" id="st-week">–</span><span class="stat-label">7 天内</span></button>
-      <button class="stat-item" type="button" data-jump="sec-rooms"><span class="stat-value" id="st-rooms">–</span><span class="stat-label">主播在播</span></button>
+      <button class="stat-item" type="button" data-jump="sec-live"><span class="stat-value" id="st-rooms">–</span><span class="stat-label">主播在播</span></button>
     </div>
   </header>
 
   <!-- 吸顶导航：点击滚动到对应分栏并聚焦，滚动时高亮当前分栏 -->
   <nav class="jumpbar" id="jumpbar" aria-label="页面分栏">
     <div class="jumpbar-inner">
-      <button class="jump" type="button" data-jump="sec-live">进行中 <span class="jump-count" id="jc-live"></span></button>
+      <button class="jump" type="button" data-jump="sec-results">赛果 <span class="jump-count" id="jc-results"></span></button>
+      <button class="jump" type="button" data-jump="sec-live">直播 <span class="jump-count" id="jc-live"></span></button>
       <button class="jump" type="button" data-jump="sec-upcoming">赛程 <span class="jump-count" id="jc-upcoming"></span></button>
-      <button class="jump" type="button" data-jump="sec-rooms">主播 <span class="jump-count" id="jc-rooms"></span></button>
-      <button class="jump" type="button" data-jump="sec-results">赛果</button>
       <button class="jump" type="button" data-jump="sec-admin" id="jump-admin" hidden>管理</button>
     </div>
   </nav>
@@ -53,30 +52,21 @@
   <main class="main">
     <section class="subs" id="subs" aria-label="订阅"></section>
 
-    <div class="columns">
-      <div class="col-main">
-        <section class="section" id="sec-live" tabindex="-1" aria-labelledby="h-live">
-          <div class="sec-head"><h2 id="h-live">进行中</h2><span class="sec-count" id="sc-live"></span></div>
-          <div id="live-body"><div class="loading"><div class="loading-panel"><span class="pixel-loader" aria-hidden="true"><i></i><i></i><i></i></span>LOADING</div></div></div>
-        </section>
+    <!-- 从上到下：赛果（紧凑网格）→ 直播（主播 + 进行中的比赛）→ 赛程 → 管理 -->
+    <section class="section" id="sec-results" tabindex="-1" aria-labelledby="h-results">
+      <div class="sec-head"><h2 id="h-results">赛果</h2><span class="sec-count" id="sc-results"></span><span class="sec-note" id="sn-results"></span></div>
+      <div id="results-body"><div class="loading"><div class="loading-panel"><span class="pixel-loader" aria-hidden="true"><i></i><i></i><i></i></span>LOADING</div></div></div>
+    </section>
 
-        <section class="section" id="sec-upcoming" tabindex="-1" aria-labelledby="h-upcoming">
-          <div class="sec-head"><h2 id="h-upcoming">赛程</h2><span class="sec-count" id="sc-upcoming"></span></div>
-          <div id="upcoming-body"></div>
-        </section>
-      </div>
+    <section class="section" id="sec-live" tabindex="-1" aria-labelledby="h-live">
+      <div class="sec-head"><h2 id="h-live">直播</h2><span class="sec-count" id="sc-live"></span><span class="sec-note" id="sn-live"></span></div>
+      <div id="live-body"></div>
+    </section>
 
-      <aside class="col-side">
-        <section class="section" id="sec-rooms" tabindex="-1" aria-labelledby="h-rooms">
-          <div class="sec-head"><h2 id="h-rooms">主播</h2><span class="sec-count" id="sc-rooms"></span></div>
-          <div id="rooms-body"></div>
-        </section>
-        <section class="section" id="sec-results" tabindex="-1" aria-labelledby="h-results">
-          <div class="sec-head"><h2 id="h-results">赛果</h2><span class="sec-count" id="sc-results"></span></div>
-          <div id="results-body"></div>
-        </section>
-      </aside>
-    </div>
+    <section class="section" id="sec-upcoming" tabindex="-1" aria-labelledby="h-upcoming">
+      <div class="sec-head"><h2 id="h-upcoming">赛程</h2><span class="sec-count" id="sc-upcoming"></span></div>
+      <div id="upcoming-body"></div>
+    </section>
 
     <section class="section" id="sec-admin" tabindex="-1" aria-labelledby="h-admin" hidden>
       <div class="sec-head"><h2 id="h-admin">管理</h2></div>

@@ -172,7 +172,8 @@ if (( RESET )) || [[ -z "$TG_TOKEN" || -z "$OWNER_ID" ]]; then
     warn "应为纯数字"
   done
 fi
-if (( RESET )) || [[ -z "$TG_WEBHOOK_SECRET" ]]; then TG_WEBHOOK_SECRET="$(rand)"; fi
+NEW_SECRET=0
+if (( RESET )) || [[ -z "$TG_WEBHOOK_SECRET" ]]; then TG_WEBHOOK_SECRET="$(rand)"; NEW_SECRET=1; fi
 if (( RESET )) || [[ -z "$ADMIN_TOKEN" ]]; then ADMIN_TOKEN="$(rand)"; fi
 save_env
 
@@ -222,14 +223,27 @@ for i in $(seq 1 12); do
   sleep 5
 done
 SETUP_OK=0
-for i in 1 2 3 4 5; do
+for i in 1 2 3 4 5 6 7 8; do
   res="$(curl -s "$WORKER_URL/setup?token=$ADMIN_TOKEN" || true)"
   # 只要求 webhook 成功；命令菜单失败不影响使用
   if grep -qE '"webhook":\{"ok":true' <<<"$res"; then SETUP_OK=1; break; fi
-  sleep 4   # secret 刚设置，等新版本生效
+  # 前几次多半是 secret 刚设置、新版本还没生效；Telegram 偶尔解析不了 workers.dev 域名，多等一会儿
+  (( i > 1 )) && echo "  第 $i 次重试…"
+  sleep $(( i < 4 ? 4 : 10 ))
 done
-(( SETUP_OK )) || die "注册失败，Worker 返回：$res"
-ok "webhook 已注册"
+if (( SETUP_OK )); then
+  ok "webhook 已注册"
+else
+  # 注册失败时 Telegram 会保留原来的 webhook。地址没变、secret 也没换的话，原来那个照样能用，不必中断
+  cur="$(curl -s "https://api.telegram.org/bot${TG_TOKEN}/getWebhookInfo" | sed 's#\\/#/#g' || true)"
+  if (( ! NEW_SECRET )) && grep -qF "\"url\":\"$WORKER_URL/tg\"" <<<"$cur"; then
+    warn "这次没能重新注册 webhook（Telegram：$(sed -E 's/.*"description":"([^"]*)".*/\1/' <<<"$res")）"
+    warn "不过之前注册的地址和 secret 都没变，bot 照常工作。想重试的话之后再运行一次 ./init.sh"
+  else
+    die "注册失败，Worker 返回：$res
+  Telegram 解析不了域名这类错误一般过几分钟就好，稍后重新运行 ./init.sh"
+  fi
+fi
 if grep -q 'chat not found' <<<"$res"; then
   warn "管理员命令菜单暂未设置：你还没给这个 bot 发过消息。发一次 /start 就会自动补上，不影响使用"
 elif ! grep -qE '"ownerCommands":\{"ok":true' <<<"$res"; then

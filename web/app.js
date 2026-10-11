@@ -62,6 +62,7 @@
     data: null,
     token: store.get('sabonner.token'),
     admin: { users: null, search: [], q: '', busy: false },
+    resultsOpen: store.get('sabonner.resultsOpen') === '1',
     error: null,
   };
 
@@ -112,7 +113,7 @@
     }
     const f = flag(cc);
     return `<div class="${cls}">
-      <span class="team-logo"${aiPick ? ' title="AI 预测胜者"' : ''}>${logo ? `<img src="${esc(logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}${aiPick ? '<i class="ai-tag">AI</i>' : ''}</span>
+      <span class="team-logo">${logo ? `<img src="${esc(logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}${aiPick ? aiTag(m, side) : ''}</span>
       <span class="team-name" title="${esc(name)}${rank ? ` · 世界排名 #${rank}` : ''}">${f ? `<span class="flag">${f}</span>` : ''}${esc(name)}${rank ? `<span class="rank">#${rank}</span>` : ''}</span>
       ${showScore ? `<span class="team-score">${score ?? 0}</span>` : ''}
     </div>`;
@@ -140,33 +141,37 @@
   const fmtPrize = (n) => (!n ? '' : n >= 1e6 ? `$${+(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `$${+(n / 1e3).toFixed(1)}K` : `$${n}`);
   const starRow = (n) => `<span class="stars" title="bo3 星级 ${n}/5">${'<b>★</b>'.repeat(n)}${'<i>★</i>'.repeat(5 - n)}</span>`;
 
-  function metaStrip(m) {
-    const parts = [];
-    if (m.prize) parts.push(`<span class="meta-item">${fmtPrize(m.prize)}</span>`);
-    if (m.event_type === 'lan') parts.push('<span class="meta-item meta-lan">LAN</span>');
-    else if (m.event_type === 'online') parts.push('<span class="meta-item meta-online">ONLINE</span>');
-    if (m.stars != null) parts.push(`<span class="meta-item">${starRow(m.stars)}</span>`);
-    if (m.tournament_hltv) parts.push(`<a class="meta-item meta-link" href="${esc(m.tournament_hltv)}" target="_blank" rel="noopener" title="HLTV 赛事页">HLTV ↗</a>`);
-    return parts.length ? `<div class="card-meta">${parts.join('')}</div>` : '';
+  // AI 预测：挂在预测胜者队徽左上角的小标「AI 2:0」（比分按预测胜者的视角）；
+  // 比赛结束后猜中变绿、没猜中变红并划掉
+  function aiVerdict(m) {
+    if (!m.ai || m.status !== 'finished') return null;
+    const w = m.winner_id || (m.s1 !== m.s2 ? (m.s1 > m.s2 ? m.team1_id : m.team2_id) : null);
+    return w ? w === m.ai.winner_id : null;
+  }
+  function aiTag(m, side) {
+    const sc = m.ai.s1 != null && m.ai.s2 != null ? (side === 1 ? `${m.ai.s1}:${m.ai.s2}` : `${m.ai.s2}:${m.ai.s1}`) : '';
+    const v = aiVerdict(m);
+    const name = side === 1 ? m.team1 : m.team2;
+    const tip = `AI 预测 ${name}${sc ? ' ' + sc : ''} 胜${v === true ? ' · 猜中' : v === false ? ' · 没猜中' : ''}`;
+    return `<i class="ai-tag${v === true ? ' ai-ok' : v === false ? ' ai-miss' : ''}" title="${esc(tip)}">AI${sc ? `<span>${sc}</span>` : ''}</i>`;
   }
 
-  function aiLine(m) {
-    if (!m.ai) return '';
-    const side = m.ai.winner_id === m.team1_id ? 1 : m.ai.winner_id === m.team2_id ? 2 : 0;
-    if (!side) return '';
-    const name = side === 1 ? m.team1 : m.team2;
-    // 比分从预测胜者的角度写：「SPIRIT 2:0」
-    const score = m.ai.s1 != null && m.ai.s2 != null ? ` ${side === 1 ? `${m.ai.s1}:${m.ai.s2}` : `${m.ai.s2}:${m.ai.s1}`}` : '';
-    let verdict = '';
-    if (m.status === 'finished' && m.winner_id) verdict = m.winner_id === m.ai.winner_id ? '<b class="ai-ok">✓ 猜中</b>' : '<b class="ai-miss">✗ 没猜中</b>';
-    return `<div class="ai-line"><i class="ai-tag">AI</i><span>预测 <strong>${esc(name)}</strong>${score}</span>${verdict}</div>`;
+  // 头部第二行：赛段 · 奖金 · LAN · 星级 · HLTV
+  function tourSub(m) {
+    const parts = [];
+    if (m.stage) parts.push(m.stage_url
+      ? `<a class="tour-stage" href="${esc(m.stage_url)}" target="_blank" rel="noopener">${esc(m.stage)}</a>`
+      : `<span class="tour-stage">${esc(m.stage)}</span>`);
+    if (m.prize) parts.push(`<span class="tm-prize" title="总奖金">${fmtPrize(m.prize)}</span>`);
+    if (m.event_type === 'lan') parts.push('<span class="tm-tag tm-lan" title="线下赛">LAN</span>');
+    else if (m.event_type === 'online') parts.push('<span class="tm-tag tm-online" title="线上赛">ONLINE</span>');
+    if (m.stars) parts.push(starRow(m.stars));
+    if (m.tournament_hltv) parts.push(`<a class="tm-link" href="${esc(m.tournament_hltv)}" target="_blank" rel="noopener" title="HLTV 赛事页">HLTV↗</a>`);
+    return parts.length ? `<span class="tour-sub">${parts.join('')}</span>` : '';
   }
 
   function matchCard(m, stars) {
     const tier = String(m.tier || '').toLowerCase();
-    const stage = m.stage
-      ? (m.stage_url ? `<a class="tour-stage" href="${esc(m.stage_url)}" target="_blank" rel="noopener">${esc(m.stage)}</a>` : `<span class="tour-stage">${esc(m.stage)}</span>`)
-      : '';
     const t = nowSec();
     let when;
     if (m.status === 'current') when = `<span class="when-time">${clock(m.start)}</span><span class="countdown">已开赛 ${dur(t - m.start)}</span>`;
@@ -178,11 +183,10 @@
       ${m.status === 'current' ? '<div class="live-band"><span class="live-dot"></span>LIVE</div>' : ''}
       <div class="card-top">
         <span class="tier tier-${esc(tier)}" title="Tier ${esc(tier.toUpperCase())}">${esc(tier.toUpperCase() || '?')}</span>
-        <span class="tour"><span class="tour-name" title="${esc(m.tournament)}">${esc(m.tournament || '未知赛事')}</span>${stage}</span>
+        <span class="tour"><span class="tour-name" title="${esc(m.tournament)}">${esc(m.tournament || '未知赛事')}</span>${tourSub(m)}</span>
         <span class="bo">BO${m.bo}</span>
       </div>
-      ${metaStrip(m)}
-      <div class="teams">${teamRow(m, 1, stars)}${teamRow(m, 2, stars)}${aiLine(m)}</div>
+      <div class="teams">${teamRow(m, 1, stars)}${teamRow(m, 2, stars)}</div>
       ${mapRows(m)}
       <div class="card-foot"><span class="when">${when}</span><a class="ext" href="${esc(m.url)}" target="_blank" rel="noopener">bo3.gg ↗</a></div>
     </article>`;
@@ -209,42 +213,72 @@
 
   const empty = (title, text) => `<div class="empty"><h2>${esc(title)}</h2><p>${esc(text)}</p></div>`;
 
-  function roomList(rooms) {
-    if (!rooms.length) return '<div class="mini"><p class="mini-empty">管理员还没有添加斗鱼房间</p></div>';
+  // 主播：紧凑小条，在播的排前面；放在「直播」分栏顶部
+  function streamerStrip(rooms) {
+    if (!rooms.length) return '';
     const sorted = [...rooms].sort((a, b) => Number(b.live) - Number(a.live));
     const t = nowSec();
-    return `<div class="mini">${sorted.map((r) => {
+    return `<div class="streamers">${sorted.map((r) => {
       const name = r.owner || `斗鱼 ${r.room_id}`;
       const since = r.live
         ? (r.show_time ? `已播 ${dur(t - r.show_time)}` : '直播中')
         : (r.changed_at ? `${dur(t - r.changed_at)}前下播` : '未开播');
-      const meta = [r.category, since, r.room_id].filter(Boolean).map(esc).join(' · ');
-      return `<a class="mini-row room-row ${r.live ? 'live' : ''}" href="https://www.douyu.com/${esc(r.room_id)}" target="_blank" rel="noopener" title="${esc(r.title || '')}">
+      const sub = [r.live ? r.title : '', r.category, since].filter(Boolean).map(esc).join(' · ');
+      return `<a class="streamer${r.live ? ' live' : ''}" href="https://www.douyu.com/${esc(r.room_id)}" target="_blank" rel="noopener" title="${esc(`${name}${r.title ? ' · ' + r.title : ''} · 斗鱼 ${r.room_id}`)}">
         <span class="room-avatar">${r.avatar ? `<img src="${esc(r.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}<i class="room-dot" aria-hidden="true"></i></span>
-        <span class="mini-main"><span class="mini-title">${esc(name)}${r.live ? ' <span class="badge badge-live">LIVE</span>' : ''}</span>
-          ${r.title ? `<span class="mini-sub room-sub">${esc(r.title)}</span>` : ''}
-          <span class="mini-sub">${meta}</span></span>
-        <span class="mini-arrow">↗</span></a>`;
+        <span class="st-main"><span class="st-name">${esc(name)}${r.live ? '<i class="live-tag">LIVE</i>' : ''}</span><span class="st-sub">${sub}</span></span>
+      </a>`;
     }).join('')}</div>`;
   }
 
-  function resultList(list) {
-    if (!list.length) return '<div class="mini"><p class="mini-empty">最近 7 天没有已结束的比赛</p></div>';
+  // 赛果：紧凑小卡网格，默认只显示前两行，可展开
+  function resultTile(m, stars) {
+    const w1 = m.winner_id ? m.winner_id === m.team1_id : m.s1 > m.s2;
+    const v = aiVerdict(m);
+    const row = (side) => {
+      const id = side === 1 ? m.team1_id : m.team2_id;
+      const name = side === 1 ? m.team1 : m.team2;
+      const logo = side === 1 ? m.team1_logo : m.team2_logo;
+      const f = flag(side === 1 ? m.team1_cc : m.team2_cc);
+      const rank = side === 1 ? m.team1_rank : m.team2_rank;
+      const won = side === 1 ? w1 : !w1;
+      const ai = m.ai && m.ai.winner_id === id && v != null
+        ? `<i class="ai-tag ${v ? 'ai-ok' : 'ai-miss'}" title="AI 预测 ${esc(name)} 胜 · ${v ? '猜中' : '没猜中'}">AI${v ? '✓' : '✗'}</i>` : '';
+      return `<span class="res-team${won ? ' win' : ' lose'}${stars.has(id) ? ' star' : ''}">
+        <span class="res-logo">${logo ? `<img src="${esc(logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}</span>
+        <span class="res-name">${f ? `<span class="flag">${f}</span>` : ''}<span class="nm">${esc(name)}</span>${rank ? `<span class="rank">#${rank}</span>` : ''}${ai}</span>
+        <b class="res-s">${side === 1 ? m.s1 : m.s2}</b></span>`;
+    };
+    const tier = String(m.tier || '').toLowerCase();
+    const lbl = dayLabel(m.start);
+    return `<a class="res" href="${esc(m.url)}" target="_blank" rel="noopener" title="${esc(m.tournament)}${m.stage ? ' · ' + esc(m.stage) : ''}">
+      <span class="res-head"><span class="tier tier-sm tier-${esc(tier)}">${esc(tier.toUpperCase() || '?')}</span>
+        <span class="res-tour">${esc(m.tournament || '')}${m.stage ? ` · ${esc(m.stage)}` : ''}</span>
+        <span class="res-when">${esc(lbl.rel || lbl.main.split(' ')[0])} ${clock(m.start)}</span></span>
+      ${row(1)}${row(2)}
+    </a>`;
+  }
+
+  function resultGrid(list) {
+    if (!list.length) return '<div class="idle">最近 7 天没有已结束的比赛</div>';
     const stars = subTeamIds();
-    return `<div class="mini">${list.map((m) => {
-      const w1 = m.winner_id ? m.winner_id === m.team1_id : m.s1 > m.s2;
-      const name = (side) => {
-        const f = flag(side === 1 ? m.team1_cc : m.team2_cc);
-        const id = side === 1 ? m.team1_id : m.team2_id;
-        return `${f ? f + ' ' : ''}${esc(side === 1 ? m.team1 : m.team2)}${stars.has(id) ? ' ★' : ''}`;
-      };
-      const lbl = dayLabel(m.start);
-      return `<a class="mini-row" href="${esc(m.url)}" target="_blank" rel="noopener" title="${esc(m.tournament)}${m.stage ? ' · ' + esc(m.stage) : ''}">
-        <span class="res-date">${esc(lbl.rel || lbl.main.split(' ')[0])}</span>
-        <span class="mini-main"><span class="res-score"><span class="t1 ${w1 ? '' : 'lose'}">${name(1)}</span><b>${m.s1}:${m.s2}</b><span class="${w1 ? 'lose' : ''}">${name(2)}</span></span>
-          <span class="mini-sub">${esc(String(m.tier || '').toUpperCase())} · ${esc(m.tournament)}${m.stage ? ' · ' + esc(m.stage) : ''}${m.ai && m.winner_id ? (m.ai.winner_id === m.winner_id ? ' · AI ✓' : ' · AI ✗') : ''}</span></span>
-        <span class="mini-arrow">↗</span></a>`;
-    }).join('')}</div>`;
+    return `<div class="res-grid${state.resultsOpen ? '' : ' collapsed'}" id="res-grid">${list.map((m) => resultTile(m, stars)).join('')}</div>`;
+  }
+
+  // 收起时只留两行（手机上一列时留三行），按当前列数算
+  function clampResults() {
+    const grid = document.getElementById('res-grid');
+    const btn = document.getElementById('res-more');
+    if (!grid) { if (btn) btn.hidden = true; return; }
+    const cols = getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length || 1;
+    const keep = cols === 1 ? 3 : cols * 2;
+    const tiles = grid.children;
+    for (let i = 0; i < tiles.length; i++) tiles[i].hidden = !state.resultsOpen && i >= keep;
+    if (btn) {
+      btn.hidden = tiles.length <= keep;
+      btn.textContent = state.resultsOpen ? '收起 ↑' : `全部 ${tiles.length} 场 ↓`;
+      btn.setAttribute('aria-expanded', String(state.resultsOpen));
+    }
   }
 
   // 进行中为空时：一行提示 + 下一场
@@ -333,7 +367,7 @@
     $('#btn-admin-label').textContent = admin ? '已登录' : '管理';
 
     if (!d) {
-      if (state.error) $('#live-body').innerHTML = empty('连不上服务', state.error);
+      if (state.error) $('#results-body').innerHTML = empty('连不上服务', state.error);
       return;
     }
 
@@ -350,13 +384,14 @@
     $('#st-week').textContent = upcoming.filter((m) => m.start < t + 7 * 86400).length;
     $('#st-rooms').textContent = `${roomsLive}/${d.rooms.length}`;
     const setCount = (id, n, hot) => { const el = $(id); el.textContent = n || ''; el.classList.toggle('hot', !!hot && n > 0); };
-    setCount('#jc-live', live.length, true);
+    setCount('#jc-results', results.length);
+    setCount('#jc-live', live.length + roomsLive, true);
     setCount('#jc-upcoming', upcoming.length);
-    setCount('#jc-rooms', roomsLive, true);
     $('#sc-live').textContent = live.length || '';
+    $('#sn-live').textContent = [live.length ? `${live.length} 场比赛` : '', d.rooms.length ? `主播 ${roomsLive}/${d.rooms.length} 在播` : ''].filter(Boolean).join(' · ');
     $('#sc-upcoming').textContent = upcoming.length || '';
-    $('#sc-rooms').textContent = d.rooms.length ? `${roomsLive}/${d.rooms.length}` : '';
     $('#sc-results').textContent = results.length || '';
+    $('#sn-results').innerHTML = results.length ? '<span>最近 7 天</span><button class="sec-more" id="res-more" type="button" aria-controls="res-grid" hidden></button>' : '';
     $('#updated').textContent = d.last_refresh ? `赛程更新于 ${dur(t - d.last_refresh)}前` : '';
 
     // 订阅条
@@ -369,12 +404,13 @@
 
     const stars = subTeamIds();
     keepFocus(() => {
-      $('#live-body').innerHTML = live.length ? `<div class="grid">${live.map((m) => matchCard(m, stars)).join('')}</div>` : idleLine(upcoming);
+      $('#results-body').innerHTML = resultGrid(results);
+      $('#live-body').innerHTML = streamerStrip(d.rooms)
+        + (live.length ? `<div class="grid">${live.map((m) => matchCard(m, stars)).join('')}</div>` : idleLine(upcoming));
       $('#upcoming-body').innerHTML = grouped(upcoming) || empty('暂无赛程', '订阅范围内 7 天内没有比赛');
-      $('#rooms-body').innerHTML = roomList(d.rooms);
-      $('#results-body').innerHTML = resultList(results);
       if (admin) $('#admin-body').innerHTML = adminPanel();
     });
+    clampResults();
     updateCurrent();
   }
 
@@ -399,17 +435,14 @@
     if (pinned && Date.now() < pinned.until) return;
     pinned = null;
     const bar = $('#jumpbar').getBoundingClientRect().bottom + 24;
-    // 宽屏时侧栏吸顶、一直在视野里，不参与高亮判断（否则滚赛程时会一直亮「主播」）
-    const sideSticky = getComputedStyle($('.col-side')).position === 'sticky';
     let cur = null;
     for (const b of document.querySelectorAll('.jump')) {
       const sec = document.getElementById(b.dataset.jump);
       if (!sec || sec.hidden) continue;
-      if (sideSticky && sec.closest('.col-side')) continue;
       const r = sec.getBoundingClientRect();
       if (r.top <= bar && r.bottom > bar) cur = b.dataset.jump;
     }
-    if (!cur && window.scrollY < 10) cur = 'sec-live'; // 在页面顶部时高亮第一个
+    if (!cur && window.scrollY < 10) cur = 'sec-results'; // 在页面顶部时高亮第一个
     if (!cur) {
       const atBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4;
       if (atBottom) cur = [...document.querySelectorAll('.jump')].filter((b) => !b.hidden).pop()?.dataset.jump;
@@ -422,7 +455,7 @@
     ticking = true;
     requestAnimationFrame(() => { updateCurrent(); ticking = false; });
   }, { passive: true });
-  window.addEventListener('resize', updateCurrent);
+  window.addEventListener('resize', () => { clampResults(); updateCurrent(); });
   $('#to-top').addEventListener('click', () => {
     window.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
     $('#header').querySelector('.logo').focus({ preventScroll: true });
@@ -484,6 +517,14 @@
     if (jumpBtn) {
       if (jumpBtn.dataset.jump === 'sec-admin' && !state.admin.users) loadUsers();
       jumpTo(jumpBtn.dataset.jump);
+      return;
+    }
+    if (e.target.closest('#res-more')) {
+      state.resultsOpen = !state.resultsOpen;
+      store.set('sabonner.resultsOpen', state.resultsOpen ? '1' : null);
+      $('#res-grid')?.classList.toggle('collapsed', !state.resultsOpen);
+      clampResults();
+      if (!state.resultsOpen) jumpTo('sec-results'); // 收起后回到赛果顶部，不让页面停在半空
       return;
     }
     const btn = e.target.closest('[data-act]');
