@@ -27,7 +27,26 @@ worker/
 web/              （第二期）
 ```
 
-## 部署（命令行）
+## 一键部署
+
+在你自己的电脑或 Debian 服务器上，需要 **Node.js 20+**、`git`、`curl`：
+
+```bash
+git clone https://github.com/10ta/Sabonner.git
+cd Sabonner
+./init.sh
+```
+
+脚本会依次问你：是否继续 → Cloudflare 登录方式（浏览器 / API token）→ 时区 → bot token → 你的 Telegram user id，其余全部自动完成：建 D1 数据库并建表、部署 Worker、生成并设置 secret、注册 webhook 和命令菜单。
+
+- 配置保存在仓库根目录的 `.sabonner.env`（权限 600、已加入 `.gitignore`），**管理密码 `ADMIN_TOKEN` 也在里面**。
+- **以后更新**：`git pull && ./init.sh`，不会再提问。
+- **换 bot 或换管理员**：`./init.sh --reset`，会重新问 token 和 user id，并重新生成 webhook 密钥和管理密码。
+- 首次运行后 `worker/wrangler.toml` 会写入 database_id 和时区，提交到仓库即可（不是机密）。
+
+部署完成后照下面「在 Telegram 里测试」一节验证。
+
+## 手动部署（init.sh 做的事，排错时参考）
 
 在你自己的电脑或 Debian 服务器上操作，需要 **Node.js 20 或更新**（`node -v` 查看）。
 

@@ -1,0 +1,6 @@
+node_modules/
+.wrangler/
+.dev.vars
+*.log
+# init.sh 保存的部署配置（含 bot token 和管理密码）
+.sabonner.env
