@@ -70,6 +70,7 @@ export async function refreshSchedule(ctx) {
   const map = new Map();
   for (const m of [...byTier, ...byTeam]) {
     if (!m.start_ts) continue;
+    if (!m.team1_id && !m.team2_id) continue; // 两队都未定（TBD vs TBD）不跟踪；对阵确定后下次刷新自动补上
     if (m.status === 'current' || (m.status === 'upcoming' && m.start_ts <= t + WINDOW)) map.set(m.id, m);
   }
 

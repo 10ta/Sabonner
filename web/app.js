@@ -60,7 +60,6 @@
   // ---------- 状态 ----------
   const state = {
     data: null,
-    tab: store.get('sabonner.tab'),
     token: store.get('sabonner.token'),
     admin: { users: null, search: [], q: '', busy: false },
     error: null,
@@ -87,6 +86,9 @@
     }
     render();
   }
+
+  const bothTbd = (m) => !m.team1_id && !m.team2_id;
+  const visible = (list) => (list || []).filter((m) => !bothTbd(m));
 
   // ---------- 渲染：卡片 ----------
   const subTeamIds = () => new Set((state.data?.subs?.teams || []).map((t) => t.id));
@@ -178,14 +180,42 @@
 
   const empty = (title, text) => `<div class="empty"><h2>${esc(title)}</h2><p>${esc(text)}</p></div>`;
 
-  function roomCards(rooms) {
-    if (!rooms.length) return empty('没有主播', '管理员还没有添加斗鱼房间');
-    return `<div class="grid">${rooms.map((r) => `<article class="card room ${r.live ? 'live' : ''}">
-      <div class="room-head"><span class="room-status"></span><span class="room-name">${esc(r.owner || r.room_id)}</span>${r.live ? '<span class="badge badge-live">LIVE</span>' : ''}</div>
-      <div class="room-title">${esc(r.title || '')}</div>
-      <div class="card-foot"><span class="when"><span class="countdown">${r.live ? '直播中' : '未开播'}${r.changed_at ? ' · ' + dur(nowSec() - r.changed_at) + '前' + (r.live ? '开播' : '下播') : ''}</span></span>
-        <a class="ext" href="https://www.douyu.com/${esc(r.room_id)}" target="_blank" rel="noopener">douyu ${esc(r.room_id)} ↗</a></div>
-    </article>`).join('')}</div>`;
+  function roomList(rooms) {
+    if (!rooms.length) return '<div class="mini"><p class="mini-empty">管理员还没有添加斗鱼房间</p></div>';
+    const sorted = [...rooms].sort((a, b) => Number(b.live) - Number(a.live));
+    return `<div class="mini">${sorted.map((r) => `<a class="mini-row ${r.live ? 'live' : ''}" href="https://www.douyu.com/${esc(r.room_id)}" target="_blank" rel="noopener">
+      <span class="room-dot" aria-hidden="true"></span>
+      <span class="mini-main"><span class="mini-title">${esc(r.owner || r.room_id)}${r.live ? ' <span class="badge badge-live">LIVE</span>' : ''}</span>
+        <span class="mini-sub">${r.live ? esc(r.title || '直播中') : `未开播${r.changed_at ? ' · ' + dur(nowSec() - r.changed_at) + '前下播' : ''}`}</span></span>
+      <span class="mini-arrow">↗</span></a>`).join('')}</div>`;
+  }
+
+  function resultList(list) {
+    if (!list.length) return '<div class="mini"><p class="mini-empty">最近 7 天没有已结束的比赛</p></div>';
+    const stars = subTeamIds();
+    return `<div class="mini">${list.map((m) => {
+      const w1 = m.winner_id ? m.winner_id === m.team1_id : m.s1 > m.s2;
+      const name = (side) => {
+        const f = flag(side === 1 ? m.team1_cc : m.team2_cc);
+        const id = side === 1 ? m.team1_id : m.team2_id;
+        return `${f ? f + ' ' : ''}${esc(side === 1 ? m.team1 : m.team2)}${stars.has(id) ? ' ★' : ''}`;
+      };
+      const lbl = dayLabel(m.start);
+      return `<a class="mini-row" href="${esc(m.url)}" target="_blank" rel="noopener" title="${esc(m.tournament)}${m.stage ? ' · ' + esc(m.stage) : ''}">
+        <span class="res-date">${esc(lbl.rel || lbl.main.split(' ')[0])}</span>
+        <span class="mini-main"><span class="res-score"><span class="t1 ${w1 ? '' : 'lose'}">${name(1)}</span><b>${m.s1}:${m.s2}</b><span class="${w1 ? 'lose' : ''}">${name(2)}</span></span>
+          <span class="mini-sub">${esc(String(m.tier || '').toUpperCase())} · ${esc(m.tournament)}${m.stage ? ' · ' + esc(m.stage) : ''}</span></span>
+        <span class="mini-arrow">↗</span></a>`;
+    }).join('')}</div>`;
+  }
+
+  // 进行中为空时：一行提示 + 下一场
+  function idleLine(upcoming) {
+    const next = upcoming[0];
+    if (!next) return '<div class="idle">现在没有进行中的比赛<span class="muted">· 订阅范围内暂无赛程</span></div>';
+    const f1 = flag(next.team1_cc), f2 = flag(next.team2_cc);
+    return `<div class="idle">现在没有进行中的比赛<span class="muted">· 下一场 ${esc(dayLabel(next.start).rel || dayLabel(next.start).main)} ${clock(next.start)}（${dur(next.start - nowSec())}后）</span>
+      <a href="${esc(next.url)}" target="_blank" rel="noopener">${f1 ? f1 + ' ' : ''}${esc(next.team1)} vs ${f2 ? f2 + ' ' : ''}${esc(next.team2)} ↗</a></div>`;
   }
 
   // ---------- 渲染：管理 ----------
@@ -241,29 +271,51 @@
   }
 
   // ---------- 渲染：整页 ----------
+  // 输入框聚焦时整块重绘会丢焦点，这里记下再恢复
+  function keepFocus(fn) {
+    const el = document.activeElement;
+    const id = el?.id;
+    const caret = el?.selectionStart;
+    fn();
+    const again = id && document.getElementById(id);
+    if (again && again !== document.activeElement && /^(INPUT|TEXTAREA)$/.test(again.tagName)) {
+      again.focus({ preventScroll: true });
+      try { if (caret != null) again.setSelectionRange(caret, caret); } catch { /* 部分输入框不支持 */ }
+    }
+  }
+
   function render() {
     const d = state.data;
-    const panel = $('#panel');
     const admin = !!state.token;
-    $('.tab-admin').hidden = !admin;
+    $('#sec-admin').hidden = !admin;
+    $('#jump-admin').hidden = !admin;
     $('#btn-admin-label').textContent = admin ? '已登录' : '管理';
 
     if (!d) {
-      panel.innerHTML = state.error ? empty('连不上服务', state.error) : panel.innerHTML;
+      if (state.error) $('#live-body').innerHTML = empty('连不上服务', state.error);
       return;
     }
 
-    // 统计
+    const live = visible(d.live);
+    const upcoming = visible(d.upcoming);
+    const results = visible(d.results);
+    const roomsLive = d.rooms.filter((r) => r.live).length;
+
+    // 统计 + 计数
     const t = nowSec();
     const dayEnd = new Date(); dayEnd.setHours(24, 0, 0, 0);
-    const todayCount = d.upcoming.filter((m) => m.start < dayEnd / 1000).length + d.live.length;
-    $('#st-live').textContent = d.live.length;
-    $('#st-today').textContent = todayCount;
-    $('#st-week').textContent = d.upcoming.filter((m) => m.start < t + 7 * 86400).length;
-    $('#st-rooms').textContent = `${d.rooms.filter((r) => r.live).length}/${d.rooms.length}`;
-    $('#tc-live').textContent = d.live.length || '';
-    $('#tc-upcoming').textContent = d.upcoming.length || '';
-    $('#tc-rooms').textContent = d.rooms.filter((r) => r.live).length || '';
+    $('#st-live').textContent = live.length;
+    $('#st-today').textContent = upcoming.filter((m) => m.start < dayEnd / 1000).length + live.length;
+    $('#st-week').textContent = upcoming.filter((m) => m.start < t + 7 * 86400).length;
+    $('#st-rooms').textContent = `${roomsLive}/${d.rooms.length}`;
+    const setCount = (id, n, hot) => { const el = $(id); el.textContent = n || ''; el.classList.toggle('hot', !!hot && n > 0); };
+    setCount('#jc-live', live.length, true);
+    setCount('#jc-upcoming', upcoming.length);
+    setCount('#jc-rooms', roomsLive, true);
+    $('#sc-live').textContent = live.length || '';
+    $('#sc-upcoming').textContent = upcoming.length || '';
+    $('#sc-rooms').textContent = d.rooms.length ? `${roomsLive}/${d.rooms.length}` : '';
+    $('#sc-results').textContent = results.length || '';
     $('#updated').textContent = d.last_refresh ? `赛程更新于 ${dur(t - d.last_refresh)}前` : '';
 
     // 订阅条
@@ -273,30 +325,66 @@
       subs.teams.map((x) => `<span class="chip">${x.logo ? `<img src="${esc(x.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${flag(x.cc)} ${esc(x.name)}</span>`).join('')}${
       !subs.tiers.length && !subs.teams.length ? '<span class="muted">还没有订阅</span>' : ''}`;
 
-    // 选项卡
-    let tab = state.tab;
-    if (!tab || (tab === 'admin' && !admin)) tab = d.live.length ? 'live' : 'upcoming';
-    state.tab = tab;
-    document.querySelectorAll('.tab').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
-
     const stars = subTeamIds();
-    let html;
-    if (tab === 'live') html = d.live.length ? `<div class="grid">${d.live.map((m) => matchCard(m, stars)).join('')}</div>` : empty('现在没有比赛', '订阅范围内暂时没有进行中的比赛');
-    else if (tab === 'upcoming') html = grouped(d.upcoming) || empty('暂无赛程', '订阅范围内 7 天内没有比赛');
-    else if (tab === 'results') html = grouped(d.results, true) || empty('暂无赛果', '最近 7 天没有已结束的比赛');
-    else if (tab === 'rooms') html = roomCards(d.rooms);
-    else html = adminPanel();
-
-    // 搜索框正在输入时不整块重绘，避免丢焦点
-    const focused = document.activeElement?.id;
-    const caret = document.activeElement?.selectionStart;
-    panel.innerHTML = html;
-    if (focused && $('#' + focused)) {
-      const el = $('#' + focused);
-      el.focus();
-      try { if (caret != null) el.setSelectionRange(caret, caret); } catch { /* 部分输入框不支持 */ }
-    }
+    keepFocus(() => {
+      $('#live-body').innerHTML = live.length ? `<div class="grid">${live.map((m) => matchCard(m, stars)).join('')}</div>` : idleLine(upcoming);
+      $('#upcoming-body').innerHTML = grouped(upcoming) || empty('暂无赛程', '订阅范围内 7 天内没有比赛');
+      $('#rooms-body').innerHTML = roomList(d.rooms);
+      $('#results-body').innerHTML = resultList(results);
+      if (admin) $('#admin-body').innerHTML = adminPanel();
+    });
+    updateCurrent();
   }
+
+  // ---------- 分栏导航 ----------
+  let pinned = null;
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function jumpTo(id) {
+    const sec = document.getElementById(id);
+    if (!sec || sec.hidden) return;
+    sec.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+    sec.focus({ preventScroll: true });
+    sec.classList.remove('flash');
+    void sec.offsetWidth; // 重新触发动画
+    sec.classList.add('flash');
+    pinned = { id, until: Date.now() + 1200 }; // 平滑滚动期间保持点击的那个高亮
+    document.querySelectorAll('.jump').forEach((b) => b.setAttribute('aria-current', String(b.dataset.jump === id)));
+  }
+
+  // 滚动时高亮当前分栏：取导航条下方最靠上的那个
+  function updateCurrent() {
+    $('#to-top').classList.toggle('show', window.scrollY > 500);
+    if (pinned && Date.now() < pinned.until) return;
+    pinned = null;
+    const bar = $('#jumpbar').getBoundingClientRect().bottom + 24;
+    // 宽屏时侧栏吸顶、一直在视野里，不参与高亮判断（否则滚赛程时会一直亮「主播」）
+    const sideSticky = getComputedStyle($('.col-side')).position === 'sticky';
+    let cur = null;
+    for (const b of document.querySelectorAll('.jump')) {
+      const sec = document.getElementById(b.dataset.jump);
+      if (!sec || sec.hidden) continue;
+      if (sideSticky && sec.closest('.col-side')) continue;
+      const r = sec.getBoundingClientRect();
+      if (r.top <= bar && r.bottom > bar) cur = b.dataset.jump;
+    }
+    if (!cur && window.scrollY < 10) cur = 'sec-live'; // 在页面顶部时高亮第一个
+    if (!cur) {
+      const atBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4;
+      if (atBottom) cur = [...document.querySelectorAll('.jump')].filter((b) => !b.hidden).pop()?.dataset.jump;
+    }
+    document.querySelectorAll('.jump').forEach((b) => b.setAttribute('aria-current', String(b.dataset.jump === cur)));
+  }
+  let ticking = false;
+  window.addEventListener('scroll', () => {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(() => { updateCurrent(); ticking = false; });
+  }, { passive: true });
+  window.addEventListener('resize', updateCurrent);
+  $('#to-top').addEventListener('click', () => {
+    window.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
+    $('#header').querySelector('.logo').focus({ preventScroll: true });
+  });
 
   // ---------- 提示 ----------
   let toastTimer;
@@ -314,13 +402,12 @@
     state.token = null;
     store.set('sabonner.token', null);
     state.admin.users = null;
-    if (state.tab === 'admin') state.tab = null;
     render();
   }
 
   async function loadUsers() {
     try { state.admin.users = (await api('/api/admin/users', { admin: true })).users; } catch (e) { toast(e.message, true); }
-    if (state.tab === 'admin') render();
+    if (state.token) render();
   }
 
   async function adminAction(fn, okText) {
@@ -351,12 +438,10 @@
   }
 
   document.addEventListener('click', (e) => {
-    const tabBtn = e.target.closest('.tab');
-    if (tabBtn) {
-      state.tab = tabBtn.dataset.tab;
-      store.set('sabonner.tab', state.tab);
-      if (state.tab === 'admin' && !state.admin.users) loadUsers();
-      render();
+    const jumpBtn = e.target.closest('[data-jump]');
+    if (jumpBtn) {
+      if (jumpBtn.dataset.jump === 'sec-admin' && !state.admin.users) loadUsers();
+      jumpTo(jumpBtn.dataset.jump);
       return;
     }
     const btn = e.target.closest('[data-act]');
@@ -411,7 +496,7 @@
   // ---------- 登录 ----------
   const dlg = $('#login');
   $('#btn-admin').addEventListener('click', () => {
-    if (state.token) { state.tab = 'admin'; store.set('sabonner.tab', 'admin'); if (!state.admin.users) loadUsers(); render(); return; }
+    if (state.token) { if (!state.admin.users) loadUsers(); jumpTo('sec-admin'); return; }
     $('#login-error').hidden = true;
     $('#login-token').value = '';
     dlg.showModal();
@@ -425,15 +510,15 @@
       await api('/api/admin/me', { admin: true });
       store.set('sabonner.token', token);
       dlg.close();
-      state.tab = 'admin';
-      store.set('sabonner.tab', 'admin');
       toast('已登录');
       loadUsers();
       render();
-    } catch {
+      requestAnimationFrame(() => jumpTo('sec-admin'));
+    } catch (e) {
       state.token = null;
       const err = $('#login-error');
-      err.textContent = '密码不对';
+      // 401 时 api() 抛「管理密码无效」；其它情况（没配 API 地址、网络不通）照实显示
+      err.textContent = /管理密码无效/.test(e.message) ? '密码不对' : e.message;
       err.hidden = false;
     }
   });
@@ -485,10 +570,12 @@
   load();
   setInterval(() => {
     if (document.visibilityState !== 'visible') return;
-    // 管理页正在输入时不自动刷新
-    if (state.tab === 'admin' && (document.activeElement?.tagName === 'INPUT')) return;
+    // 正在输入时不自动刷新
+    if (document.activeElement?.tagName === 'INPUT') return;
     load();
   }, REFRESH_MS);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load(); });
-  if (state.token && state.tab === 'admin') loadUsers();
+  if (state.token) loadUsers();
+  store.set('sabonner.tab', null); // 旧版选项卡的残留
+  updateCurrent();
 })();
