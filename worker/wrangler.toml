@@ -1,0 +1,25 @@
+name = "sabonner"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# 每分钟一次。占用 Cloudflare 账户 5 个免费 cron 名额中的 1 个。
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sabonner"
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+[vars]
+# 推送和列表里显示的时区
+TZ = "Asia/Shanghai"
+
+# 以下用 `npx wrangler secret put <NAME>` 设置，不要写进仓库：
+#   TG_TOKEN           bot token
+#   TG_WEBHOOK_SECRET  随机字符串，只能用 A-Z a-z 0-9 _ -
+#   ADMIN_TOKEN        你的管理密码（网页写操作、/setup 用）
+#   OWNER_ID           你的 Telegram user id
+
+[observability]
+enabled = true
