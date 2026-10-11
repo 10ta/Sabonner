@@ -27,47 +27,171 @@ worker/
 web/              （第二期）
 ```
 
-## 部署
+## 部署（命令行）
 
-需要：Cloudflare 账号、一个**新的** Telegram bot token（找 [@BotFather](https://t.me/BotFather) 创建）、你自己的 Telegram user id（找 [@userinfobot](https://t.me/userinfobot) 查）。
+在你自己的电脑或 Debian 服务器上操作，需要 **Node.js 20 或更新**（`node -v` 查看）。
 
-> ⚠️ 这个 Worker 会占用 Cloudflare 账户 **5 个免费 cron 名额中的 1 个**，每天约 1440 次 cron 调用和若干 webhook 请求，计入账户共享的每日 10 万次请求额度。
+> ⚠️ **影响范围**：这个 Worker 会占用 Cloudflare 账户 **5 个免费 cron 名额中的 1 个**；每天约 1440 次 cron 调用加上 webhook 请求，计入整个账户共享的每日 10 万次请求额度。bot 必须是**专用的**——设置 webhook 后，这个 token 不能再被别的程序用轮询方式读取消息。
+
+### 0. 准备三样东西
+
+| 名称 | 怎么得到 |
+|---|---|
+| bot token | [@BotFather](https://t.me/BotFather) 创建 bot 时给的，形如 `123456:ABC-...` |
+| 你的 Telegram user id | 给 [@userinfobot](https://t.me/userinfobot) 发任意消息，回复里的 `Id` |
+| 两个随机串 | 运行两次 `openssl rand -hex 24`：一个当 `TG_WEBHOOK_SECRET`，一个当 `ADMIN_TOKEN`（你的管理密码，记下来） |
+
+### 1. 拿到代码、装依赖
 
 ```bash
-cd worker
+git clone https://github.com/10ta/Sabonner.git    # 或者解压 Sabonner.zip
+cd Sabonner/worker
 npm install
-npx wrangler login                      # 无浏览器的服务器上改用 CLOUDFLARE_API_TOKEN 环境变量
+```
 
-npx wrangler d1 create sabonner         # 把输出的 database_id 填进 wrangler.toml
-npm run db:init                         # 建表
+### 2. 登录 Cloudflare
 
-npx wrangler secret put TG_TOKEN            # bot token
-npx wrangler secret put TG_WEBHOOK_SECRET   # 随便一串，只能用 A-Z a-z 0-9 _ -
-npx wrangler secret put ADMIN_TOKEN         # 你的管理密码
-npx wrangler secret put OWNER_ID            # 你的 Telegram user id
+有浏览器的电脑：
 
+```bash
+npx wrangler login
+npx wrangler whoami          # 能看到账号邮箱和 Account ID 就成功了
+```
+
+**没有浏览器的服务器**：在控制台 [My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens) → Create Token → 选模板 **Edit Cloudflare Workers** → 在权限里**再加一行 Account · D1 · Edit** → 创建。然后：
+
+```bash
+export CLOUDFLARE_API_TOKEN=刚创建的token
+export CLOUDFLARE_ACCOUNT_ID=你的AccountID     # 控制台 Workers & Pages 页面右侧能看到
+npx wrangler whoami
+```
+
+### 3. 创建数据库并建表
+
+```bash
+npx wrangler d1 create sabonner
+```
+
+输出里有一行 `"database_id": "xxxxxxxx-xxxx-..."`。如果 wrangler 问要不要自动写进配置，选 **No**，手动替换（`wrangler.toml` 已经写好了绑定，只差这个 id）：
+
+```bash
+sed -i 's/REPLACE_WITH_YOUR_D1_ID/这里粘贴database_id/' wrangler.toml
+grep database_id wrangler.toml     # 确认替换成功
+
+npm run db:init                    # 在线上 D1 建表，看到 "executed successfully" 即可
+```
+
+### 4. 部署
+
+```bash
 npm run deploy
 ```
 
-部署后在浏览器打开一次（注册 webhook 和命令菜单）：
+成功后最后会打印 Worker 地址，形如 `https://sabonner.<你的子域>.workers.dev`，以及 `schedule: * * * * *`。记下地址，下面用 `$WORKER` 代指：
 
-```
-https://sabonner.<你的子域>.workers.dev/setup?token=<ADMIN_TOKEN>
-```
-
-返回里 `webhook.ok` 为 `true` 就行。然后在 Telegram 里给 bot 发：
-
-```
-/tier           勾选要订阅的 tier
-/team spirit    搜索并订阅队伍
-/room 6657      添加斗鱼主播
+```bash
+export WORKER=https://sabonner.你的子域.workers.dev
+curl $WORKER/                      # 应返回 Sabonner is running.
 ```
 
-`TZ`（推送里的时区）在 `wrangler.toml` 的 `[vars]` 里改，默认 `Asia/Shanghai`。
+> 此时还没有设置 secret，cron 每分钟空跑一次，不会出错也不会发消息。
+
+### 5. 设置 secret
+
+每条命令会提示输入值，粘贴后回车（输入时不显示）：
+
+```bash
+npx wrangler secret put TG_TOKEN            # bot token
+npx wrangler secret put TG_WEBHOOK_SECRET   # 第一个随机串
+npx wrangler secret put ADMIN_TOKEN         # 第二个随机串
+npx wrangler secret put OWNER_ID            # 你的 Telegram user id（纯数字）
+npx wrangler secret list                    # 应列出这 4 个名字
+```
+
+secret 设置后立即生效，不用重新部署。
+
+### 6. 注册 webhook 和命令菜单
+
+```bash
+curl "$WORKER/setup?token=你的ADMIN_TOKEN"
+```
+
+返回的 JSON 里 `webhook`、`publicCommands`、`ownerCommands` 三项都是 `"ok":true` 就对了。再向 Telegram 确认一次：
+
+```bash
+curl "https://api.telegram.org/bot你的BOT_TOKEN/getWebhookInfo"
+```
+
+`url` 应是 `$WORKER/tg`，`last_error_message` 不应出现。
+
+> 改了 `TG_WEBHOOK_SECRET` 或换了 Worker 地址后，要重新执行这一步。
+
+### 7. 在 Telegram 里测试
+
+给 bot 发：
+
+| 发送 | 预期 |
+|---|---|
+| `/start` | 收到带「管理」部分的帮助（说明你被识别为管理员） |
+| `/room 6657` | 「已添加 xxx（6657），当前未开播/直播中」 |
+| `/tier` → 点 **S** | 按钮变成 ✅ S |
+| `/team spirit` → 点 **➕ Spirit** | 「已订阅 Spirit。当前跟踪 N 场比赛」 |
+| `/next` | 列出订阅范围内的未来比赛 |
+| `/status` | 跟踪比赛数、上次刷新时间 |
+
+验证推送：
+- **赛前提醒**：订阅后 1 分钟内，24 小时内开赛的比赛会立刻收到一条预告。
+- **直播卡片**：想马上看到效果，可以临时 `/tier` 打开 **B** 或 **C**（这两档几乎随时有比赛在打），1–2 分钟内会收到 🔴 LIVE 卡片；看完再关掉。C 档数据量大，测完记得关。
+- **其他用户**：用另一个账号给 bot 发 `/start`，你会收到带「批准 / 拒绝」按钮的申请。
+
+### 8. 看日志
+
+```bash
+npx wrangler tail          # 实时日志，Ctrl+C 退出；cron 每分钟一条
+```
+
+或者在控制台 Worker → Observability 里看。只要没有 `[refresh]` `[live]` `[douyu]` `[flush]` 开头的报错就是正常的。
+
+直接查数据库：
+
+```bash
+npx wrangler d1 execute sabonner --remote --command "SELECT id, team1, team2, status, s1, s2 FROM matches ORDER BY start_ts LIMIT 20"
+npx wrangler d1 execute sabonner --remote --command "SELECT * FROM outbox"
+```
+
+### 更新代码
+
+```bash
+git pull            # 或替换文件
+npm run deploy
+npm run db:init     # 只在 schema.sql 有改动时需要；重复执行是安全的
+```
+
+### 常见问题
+
+| 现象 | 处理 |
+|---|---|
+| bot 完全不回复 | 看 `getWebhookInfo` 的 `last_error_message`；403 表示 `TG_WEBHOOK_SECRET` 和注册时不一致，重新执行第 6 步 |
+| `/start` 只回「已提交申请」 | `OWNER_ID` 填错了，用 `wrangler secret put OWNER_ID` 重新设 |
+| 部署报 D1 / database_id 错误 | 第 3 步的 id 没替换成功 |
+| 日志出现 `Exceeded CPU` | 免费版每次 10ms CPU 不够，先关掉 C 档 tier |
+| 推送延迟很久 | `/status` 看「待发消息」，用户太多时会分几分钟发完 |
+
+### 卸载
+
+```bash
+curl "https://api.telegram.org/bot你的BOT_TOKEN/deleteWebhook"
+npx wrangler delete                 # 删除 Worker，释放 cron 名额
+npx wrangler d1 delete sabonner     # 删除数据库
+```
 
 ### 不用命令行的部署方式
 
-Cloudflare 控制台 → Workers & Pages → Create → Import a repository，选这个仓库，**Root directory 填 `worker`**。D1 在控制台 Storage & Databases → D1 里创建，把 `schema.sql` 的内容贴进 Console 执行；secret 在 Worker 的 Settings → Variables and Secrets 里加。之后每次 push 自动部署。
+Cloudflare 控制台 → Workers & Pages → Create → Import a repository，选这个仓库，**Root directory 填 `worker`**。D1 在控制台 Storage & Databases → D1 里创建，把 `schema.sql` 的内容贴进 Console 执行，并把 database_id 写进 `wrangler.toml` 再 push；secret 在 Worker 的 Settings → Variables and Secrets 里加；之后照第 6、7 步做。每次 push 自动部署。
+
+### 时区
+
+推送里的时间默认是北京时间。改 `wrangler.toml` 的 `[vars]` 里的 `TZ`（如 `America/New_York`），然后 `npm run deploy`。
 
 ## 命令
 
