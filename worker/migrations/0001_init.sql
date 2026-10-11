@@ -1,5 +1,5 @@
 -- Sabonner D1 表结构
--- 初始化：npx wrangler d1 execute sabonner --remote --file=schema.sql
+-- 初始表结构（npx wrangler d1 migrations apply sabonner --remote 自动执行）
 
 -- 杂项键值（上次刷新时间等）
 CREATE TABLE IF NOT EXISTS kv (

@@ -1,11 +1,14 @@
 # Sabonner
 
-CS2 比赛订阅与斗鱼开播提醒：Cloudflare Worker 后端 + Telegram bot，网页前端（第二期）部署在 CF Pages / Vercel。
+CS2 比赛订阅与斗鱼开播提醒：Cloudflare Worker 后端 + Telegram bot + 网页（CF Pages / Vercel，沿用 1999 主题风格）。
 
 - 按 **tier**（S/A/B/C）或 **队伍** 订阅比赛：开赛前 1 天、前 30 分钟各提醒一次
 - 比赛进行中：一张可原地更新的比分卡片；每张图打完单独推送；结束时推送胜者
+- 每天 **UTC 0 点**发今日赛程并自动置顶，第二天替换；没有比赛时告诉你下一场是什么
+- 消息里带队伍国旗和赛段（如 [decider / 3rd place](https://bo3.gg/tournaments/esl-pro-league-season-24#tab-stages)，链接到 bo3 的赛段页）
 - **斗鱼主播开播**提醒（断流 10 分钟内重连不重复推）
 - 只有管理员能改订阅；其他人 `/start` 申请，管理员批准后只能接收推送和查看
+- 网页任何人可看；管理员输入管理密码后可在网页上改订阅、审批用户
 
 数据来自 [bo3.gg](https://bo3.gg) 的公开接口和斗鱼开放接口，均为非官方、可能随时变化。
 
@@ -14,7 +17,7 @@ CS2 比赛订阅与斗鱼开播提醒：Cloudflare Worker 后端 + Telegram bot�
 ```
 worker/
   wrangler.toml   Worker 配置（cron、D1 绑定）
-  schema.sql      D1 表结构
+  migrations/     D1 表结构（按编号依次执行，init.sh 自动处理）
   src/
     index.js      入口：/tg webhook、/setup、/api/*、cron
     engine.js     cron 调度、赛程刷新、提醒、直播轮询、斗鱼检查
@@ -23,8 +26,13 @@ worker/
     bot.js        TG 命令、按钮、用户审批
     outbox.js     发件队列（超出子请求预算的消息顺延到下一分钟）
     format.js     消息文案
-    db.js / tgapi.js / util.js / api.js
-web/              （第二期）
+    api.js        网页接口：公开只读 + /api/admin/*（管理密码）
+    db.js / tgapi.js / util.js
+web/              静态网页，CF Pages / Vercel 直接托管，无需构建
+  config.js       Worker 地址（init.sh 写入）
+  theme.css       1999 主题的配色与字体（MIT）
+  app.css / app.js
+init.sh           一键部署 / 更新
 ```
 
 ## 一键部署
@@ -42,7 +50,7 @@ cd Sabonner
 - 配置保存在仓库根目录的 `.sabonner.env`（权限 600、已加入 `.gitignore`），**管理密码 `ADMIN_TOKEN` 也在里面**。
 - **以后更新**：`git pull && ./init.sh`，不会再提问。
 - **换 bot 或换管理员**：`./init.sh --reset`，会重新问 token 和 user id，并重新生成 webhook 密钥和管理密码。
-- 首次运行后 `worker/wrangler.toml` 会写入 database_id 和时区，提交到仓库即可（不是机密）。
+- 首次运行后 `worker/wrangler.toml` 会写入 database_id 和时区、`web/config.js` 会写入 Worker 地址，按脚本最后的提示提交即可（都不是机密）。网页部署见下面「网页」一节。
 
 部署完成后照下面「在 Telegram 里测试」一节验证。
 
@@ -97,7 +105,7 @@ npx wrangler d1 create sabonner
 sed -i 's/REPLACE_WITH_YOUR_D1_ID/这里粘贴database_id/' wrangler.toml
 grep database_id wrangler.toml     # 确认替换成功
 
-npm run db:init                    # 在线上 D1 建表，看到 "executed successfully" 即可
+npm run db:migrate                 # 在线上 D1 建表（按 migrations/ 依次执行）
 ```
 
 ### 4. 部署
@@ -183,7 +191,7 @@ npx wrangler d1 execute sabonner --remote --command "SELECT * FROM outbox"
 ```bash
 git pull            # 或替换文件
 npm run deploy
-npm run db:init     # 只在 schema.sql 有改动时需要；重复执行是安全的
+npm run db:migrate  # 只执行还没跑过的迁移，重复执行是安全的
 ```
 
 ### 常见问题
@@ -206,16 +214,34 @@ npx wrangler d1 delete sabonner     # 删除数据库
 
 ### 不用命令行的部署方式
 
-Cloudflare 控制台 → Workers & Pages → Create → Import a repository，选这个仓库，**Root directory 填 `worker`**。D1 在控制台 Storage & Databases → D1 里创建，把 `schema.sql` 的内容贴进 Console 执行，并把 database_id 写进 `wrangler.toml` 再 push；secret 在 Worker 的 Settings → Variables and Secrets 里加；之后照第 6、7 步做。每次 push 自动部署。
+Cloudflare 控制台 → Workers & Pages → Create → Import a repository，选这个仓库，**Root directory 填 `worker`**。D1 在控制台 Storage & Databases → D1 里创建，把 `migrations/` 里的 SQL 按编号依次贴进 Console 执行，并把 database_id 写进 `wrangler.toml` 再 push；secret 在 Worker 的 Settings → Variables and Secrets 里加；之后照第 6、7 步做。每次 push 自动部署。
 
 ### 时区
 
 推送里的时间默认是北京时间。改 `wrangler.toml` 的 `[vars]` 里的 `TZ`（如 `America/New_York`），然后 `npm run deploy`。
 
+## 网页
+
+`web/` 是纯静态页面，Cloudflare Pages 和 Vercel 都能直接托管，不需要构建。两边都只是展示，数据都来自同一个 Worker，所以可以同时部署、互为备用。
+
+**前提**：先跑过一次 `./init.sh`，并按它最后的提示提交 `web/config.js`（里面是 Worker 地址）。
+
+**Cloudflare Pages**：控制台 → Workers & Pages → Create → Pages → 连接 GitHub 仓库 →
+Framework preset 选 **None**，Build command **留空**，Build output directory 填 **`web`** → 部署。
+
+**Vercel**：Add New → Project → 导入仓库 → Root Directory 选 **`web`**，Framework Preset 选 **Other**，Build Command 留空 → Deploy。
+
+之后每次 `git push` 两边都会自动更新。
+
+- 页面右上角 **配色按钮** 可选 19 套配色（与 1999 主题相同），记在浏览器本地。
+- 右上角 **管理** → 输入管理密码（`.sabonner.env` 里的 `ADMIN_TOKEN`）后出现「管理」页：tier、队伍搜索订阅、斗鱼房间、TG 用户审批、立即刷新。密码只存在这个浏览器里。
+- 临时指定别的 Worker：网址后加 `?api=https://xxx.workers.dev`。
+
 ## 命令
 
 | 所有已批准用户 | 管理员额外 |
 |---|---|
+| `/today` 今日赛程 | |
 | `/next` 即将开始 | `/team 名字` 搜索订阅；不带参数列出并可退订 |
 | `/live` 进行中 | `/tier` 切换 tier |
 | `/results` 最近赛果 | `/room 房间号` 添加；不带参数列出并可删除 |
@@ -233,6 +259,8 @@ cron 每分钟一次：
 | 赛程刷新 | 每 10 分钟 | 3 个（tier 1 + 队伍 2） |
 | 直播轮询 | 其他分钟，且有比赛在 30 分钟内开赛或进行中 | 1 个 + 每场 0–1 个（比分变化或每 3 分钟） |
 | 赛前提醒 | 每分钟 | 0（只查 D1） |
+| 每日预报 | UTC 0 点那一分钟 | 每人 3 个（发送、置顶、取消旧置顶），人多时顺延 |
+| 国家代码表 | 30 天一次 | 3 个 |
 | 发件 | 每分钟 | 用掉剩余预算，免费版每次调用上限 50 |
 
 ## 已知限制
@@ -240,4 +268,7 @@ cron 每分钟一次：
 - 只到**地图级**比分，没有回合级（bo3 的公开接口不提供）。
 - 地图胜者在 bo3 里有时是简称（如 "CW"），程序会尽量对应到队伍；对不上时显示「XX 胜」。
 - 斗鱼 `room_status` 只把 `"1"` 当作直播中，等实际开播时再核对一次。
+- 每日预报的「今天」是 UTC 的一天，北京时间就是早 8 点到次日早 8 点；列表包含订阅范围内的全部比赛（tier + 队伍），订阅的队伍带 ⭐。
+- 国旗来自 bo3 的队伍国籍；国际混编队伍可能显示所在地区旗帜（如 🇪🇺）或不显示。
+- **自定义 emoji（如队徽贴纸）没有用上**：Telegram 只允许「创建者账号开了 Premium」的 bot（或绑定了 Fragment 用户名的 bot）发自定义 emoji，普通账号建的 bot 发不了。
 - 免费版每次调用 CPU 上限 10ms。订阅 C tier 会让每次刷新的数据量变大，可能接近上限；如果日志里出现 `Exceeded CPU`，先关掉 C tier。

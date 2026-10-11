@@ -19,8 +19,22 @@ function fmt(tz) {
 
 // 1791700000 -> "10/11 周日 19:30"
 export function fmtTime(ts, tz = 'Asia/Shanghai') {
-  const p = Object.fromEntries(fmt(tz).formatToParts(new Date(ts * 1000)).map((x) => [x.type, x.value]));
+  const p = parts(ts, tz);
   return `${p.month}/${p.day} ${p.weekday} ${p.hour}:${p.minute}`;
+}
+
+const parts = (ts, tz) => Object.fromEntries(fmt(tz).formatToParts(new Date(ts * 1000)).map((x) => [x.type, x.value]));
+
+// "10/11 周日"
+export function fmtDate(ts, tz = 'Asia/Shanghai') {
+  const p = parts(ts, tz);
+  return `${p.month}/${p.day} ${p.weekday}`;
+}
+
+// "19:30"
+export function fmtClock(ts, tz = 'Asia/Shanghai') {
+  const p = parts(ts, tz);
+  return `${p.hour}:${p.minute}`;
 }
 
 // 秒数差 -> "2小时15分" / "35分" / "1天3小时"
@@ -37,16 +51,17 @@ export function fmtDur(sec) {
 export const TIER_LABEL = { s: 'S', a: 'A', b: 'B', c: 'C', d: 'D' };
 export const tierLabel = (t) => TIER_LABEL[t] || String(t || '?').toUpperCase();
 
+export const CORS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-headers': 'authorization, content-type',
+  'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'access-control-max-age': '86400',
+};
+
 export function json(data, status = 200, extra = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      'access-control-allow-origin': '*',
-      'access-control-allow-headers': 'authorization, content-type',
-      'access-control-allow-methods': 'GET, POST, DELETE, OPTIONS',
-      ...extra,
-    },
+    headers: { 'content-type': 'application/json; charset=utf-8', ...CORS, ...extra },
   });
 }
 
@@ -70,3 +85,12 @@ export function makeCtx(env) {
 }
 
 export const isOwner = (env, id) => String(id) === String(env.OWNER_ID);
+
+// 定长比较，避免按字符逐个比较泄露信息
+export function safeEqual(a, b) {
+  a = String(a || ''); b = String(b || '');
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}

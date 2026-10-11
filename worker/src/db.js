@@ -28,7 +28,7 @@ export async function recipients(env) {
 export async function getSubs(db) {
   const [tiers, teams] = await db.batch([
     db.prepare('SELECT tier FROM sub_tiers ORDER BY tier'),
-    db.prepare('SELECT team_id, name, slug FROM sub_teams ORDER BY name COLLATE NOCASE'),
+    db.prepare('SELECT team_id, name, slug, cc, logo FROM sub_teams ORDER BY name COLLATE NOCASE'),
   ]);
   return {
     tiers: tiers.results.map((r) => r.tier),
@@ -69,23 +69,17 @@ export function parseMatchRow(r) {
 
 // insertOnly：只插入新比赛，不覆盖已有行。赛程刷新遇到进行中的比赛时用——
 // 比分变化交给直播轮询自己对比，否则刷新会抢先把新比分写进去，轮询就看不到变化了
-const UPSERT_UPDATE = `ON CONFLICT(id) DO UPDATE SET
-  slug = excluded.slug, team1_id = excluded.team1_id, team2_id = excluded.team2_id,
-  team1 = excluded.team1, team2 = excluded.team2, tournament = excluded.tournament,
-  tier = excluded.tier, bo = excluded.bo, start_ts = excluded.start_ts,
-  status = excluded.status, s1 = excluded.s1, s2 = excluded.s2, winner_id = excluded.winner_id,
-  maps = COALESCE(excluded.maps, matches.maps), updated_at = excluded.updated_at`;
+const COLS = ['id', 'slug', 'team1_id', 'team2_id', 'team1', 'team2', 'team1_cc', 'team2_cc', 'team1_logo', 'team2_logo',
+  'tournament', 'tournament_slug', 'stage', 'tier', 'bo', 'start_ts', 'status', 's1', 's2', 'winner_id', 'maps', 'updated_at'];
+// maps 为空时保留旧值；其余字段以新数据为准
+const UPSERT_UPDATE = `ON CONFLICT(id) DO UPDATE SET ${COLS.filter((c) => c !== 'id').map((c) =>
+  (c === 'maps' ? 'maps = COALESCE(excluded.maps, matches.maps)' : `${c} = excluded.${c}`)).join(', ')}`;
+const UPSERT_SQL = `INSERT INTO matches (${COLS.join(', ')}) VALUES (${COLS.map((_, i) => `?${i + 1}`).join(', ')})`;
 
 export function upsertMatchStmt(db, m, insertOnly = false) {
-  return db.prepare(`
-    INSERT INTO matches (id, slug, team1_id, team2_id, team1, team2, tournament, tier, bo, start_ts, status, s1, s2, winner_id, maps, updated_at)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
-    ${insertOnly ? 'ON CONFLICT(id) DO NOTHING' : UPSERT_UPDATE}
-  `).bind(
-    m.id, m.slug, m.team1_id, m.team2_id, m.team1, m.team2, m.tournament, m.tier, m.bo,
-    m.start_ts, m.status, m.s1, m.s2, m.winner_id ?? null,
-    m.maps ? JSON.stringify(m.maps) : null, now(),
-  );
+  const row = { ...m, maps: m.maps ? JSON.stringify(m.maps) : null, updated_at: now(), winner_id: m.winner_id ?? null };
+  return db.prepare(`${UPSERT_SQL} ${insertOnly ? 'ON CONFLICT(id) DO NOTHING' : UPSERT_UPDATE}`)
+    .bind(...COLS.map((c) => row[c] ?? null));
 }
 
 // 清理：7 天前的比赛、30 天前的去重记录、和已结束比赛关联的可编辑消息

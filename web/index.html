@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sabonner · CS2 赛程</title>
+  <meta name="description" content="订阅的 CS2 比赛预告、比分与斗鱼开播状态">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23000'/%3E%3Crect x='3' y='3' width='10' height='10' fill='%23FFE600'/%3E%3C/svg%3E">
+  <script>
+    // 先套用上次的配色，避免深色主题闪白
+    try { var s = localStorage.getItem('sabonner.scheme'); if (s) document.documentElement.dataset.scheme = s; } catch (e) {}
+  </script>
+  <link rel="stylesheet" href="theme.css">
+  <link rel="stylesheet" href="app.css">
+  <script src="config.js"></script>
+</head>
+<body>
+  <header class="header" id="header">
+    <div class="header-content">
+      <a class="logo" href="./" aria-label="Sabonner 首页">
+        <span class="logo-mark" aria-hidden="true"></span>
+        <h1>Sabonner</h1>
+      </a>
+      <div class="header-controls">
+        <button class="btn-square btn-theme" id="btn-theme" type="button" title="配色" aria-haspopup="true" aria-expanded="false">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><rect x="3" y="3" width="8" height="8"/><rect x="13" y="3" width="8" height="8"/><rect x="3" y="13" width="8" height="8"/><rect x="13" y="13" width="8" height="8" fill="currentColor"/></svg>
+        </button>
+        <button class="btn-admin" id="btn-admin" type="button">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" aria-hidden="true"><rect x="4" y="10" width="16" height="11"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+          <span id="btn-admin-label">管理</span>
+        </button>
+      </div>
+    </div>
+    <div class="stats-bar" id="stats">
+      <div class="stat-item"><span class="stat-value" id="st-live">–</span><span class="stat-label">进行中</span></div>
+      <div class="stat-item"><span class="stat-value" id="st-today">–</span><span class="stat-label">今日比赛</span></div>
+      <div class="stat-item"><span class="stat-value" id="st-week">–</span><span class="stat-label">7 天内</span></div>
+      <div class="stat-item"><span class="stat-value" id="st-rooms">–</span><span class="stat-label">主播在播</span></div>
+    </div>
+  </header>
+
+  <main class="main">
+    <section class="subs" id="subs" aria-label="订阅"></section>
+
+    <nav class="tabs" id="tabs" role="tablist">
+      <button class="tab" role="tab" data-tab="live">进行中 <span class="tab-count" id="tc-live"></span></button>
+      <button class="tab" role="tab" data-tab="upcoming">赛程 <span class="tab-count" id="tc-upcoming"></span></button>
+      <button class="tab" role="tab" data-tab="results">赛果</button>
+      <button class="tab" role="tab" data-tab="rooms">主播 <span class="tab-count" id="tc-rooms"></span></button>
+      <button class="tab tab-admin" role="tab" data-tab="admin" hidden>管理</button>
+    </nav>
+
+    <section id="panel" class="panel" aria-live="polite">
+      <div class="loading"><div class="loading-panel"><span class="pixel-loader" aria-hidden="true"><i></i><i></i><i></i></span>LOADING</div></div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-content">
+      <span>数据：<a href="https://bo3.gg" target="_blank" rel="noopener">bo3.gg</a> · 斗鱼 · 推送：Telegram bot</span>
+      <span id="updated">—</span>
+    </div>
+  </footer>
+
+  <div class="theme-menu" id="theme-menu" hidden></div>
+
+  <dialog class="dialog" id="login">
+    <form method="dialog" id="login-form">
+      <h2>管理登录</h2>
+      <p class="muted">输入部署时生成的管理密码（.sabonner.env 里的 ADMIN_TOKEN）。只保存在这个浏览器里。</p>
+      <input type="password" id="login-token" autocomplete="current-password" placeholder="ADMIN_TOKEN" required>
+      <p class="form-error" id="login-error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="login-cancel">取消</button>
+        <button type="submit" class="btn btn-primary">登录</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

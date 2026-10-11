@@ -3,9 +3,10 @@
 //   send       普通消息
 //   live_open  直播卡片首发，记下 message_id 以便后续编辑
 //   live_edit  编辑直播卡片（同一场同一聊天只保留最新一条）
+//   daily      每日预报：发出后置顶，并取消前一天的置顶
 
 import { now } from './util.js';
-import { sendMessage, editMessage } from './tgapi.js';
+import { sendMessage, editMessage, tg } from './tgapi.js';
 
 export async function enqueue(db, items) {
   if (!items.length) return;
@@ -15,8 +16,8 @@ export async function enqueue(db, items) {
     if (it.kind === 'live_edit') {
       stmts.push(db.prepare("DELETE FROM outbox WHERE kind = 'live_edit' AND match_id = ? AND chat_id = ?").bind(it.match_id, it.chat_id));
     }
-    stmts.push(db.prepare('INSERT INTO outbox (chat_id, kind, text, match_id, created_at) VALUES (?, ?, ?, ?, ?)')
-      .bind(it.chat_id, it.kind, it.text, it.match_id ?? null, t));
+    stmts.push(db.prepare('INSERT INTO outbox (chat_id, kind, text, match_id, meta, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind(it.chat_id, it.kind, it.text, it.match_id ?? null, it.meta ?? null, t));
   }
   await db.batch(stmts);
 }
@@ -40,18 +41,27 @@ export async function flush(ctx, reserve = 0) {
     for (const r of results) msgMap.set(`${r.match_id}:${r.chat_id}`, r.message_id);
   }
 
+  const pins = new Map();
+  if (rows.some((r) => r.kind === 'daily')) {
+    const { results } = await db.prepare('SELECT * FROM pins').all();
+    for (const p of results) pins.set(p.chat_id, p);
+  }
+
   const done = [];
   const retry = [];
   const opened = [];
+  const pinned = [];
   const openPending = new Set(rows.filter((r) => r.kind === 'live_open').map((r) => `${r.match_id}:${r.chat_id}`));
   let sent = 0;
 
   for (const row of rows) {
-    if (ctx.left() <= reserve) break;
+    if (ctx.left() <= reserve + (row.kind === 'daily' ? 2 : 0)) break; // 日报要 3 个请求：发送、置顶、取消旧置顶
     const key = `${row.match_id}:${row.chat_id}`;
     let res;
     try {
-      res = await sendRow(ctx, row, key, msgMap, openPending, opened, done);
+      res = row.kind === 'daily'
+        ? await sendDaily(ctx, row, pins.get(row.chat_id), pinned)
+        : await sendRow(ctx, row, key, msgMap, openPending, opened, done);
     } catch (e) {
       // 网络异常：这条记一次失败，其余留到下一分钟（Telegram 大概率整体不可达）
       console.error('[outbox]', e?.message || e);
@@ -72,8 +82,26 @@ export async function flush(ctx, reserve = 0) {
   for (const [match_id, chat_id, message_id] of opened) {
     stmts.push(db.prepare('INSERT OR REPLACE INTO live_msgs (match_id, chat_id, message_id) VALUES (?, ?, ?)').bind(match_id, chat_id, message_id));
   }
+  for (const [chat_id, message_id, day] of pinned) {
+    stmts.push(db.prepare('INSERT OR REPLACE INTO pins (chat_id, message_id, day) VALUES (?, ?, ?)').bind(chat_id, message_id, day));
+  }
   if (stmts.length) await db.batch(stmts);
   return { sent, pending: rows.length > done.length };
+}
+
+// 发日报 → 静默置顶 → 取消上一条日报的置顶（失败都不影响消息本身）
+async function sendDaily(ctx, row, oldPin, pinned) {
+  const res = await sendMessage(ctx, row.chat_id, row.text);
+  if (!res.ok) return res;
+  const mid = res.result.message_id;
+  const pin = await tg(ctx, 'pinChatMessage', { chat_id: row.chat_id, message_id: mid, disable_notification: true });
+  if (pin.ok) {
+    if (oldPin && oldPin.message_id !== mid) {
+      await tg(ctx, 'unpinChatMessage', { chat_id: row.chat_id, message_id: oldPin.message_id });
+    }
+    pinned.push([row.chat_id, mid, row.meta || '']);
+  }
+  return res;
 }
 
 // 发一条；返回 Telegram 响应，或 null 表示本次跳过（需要丢弃时已自行放进 done）

@@ -1,0 +1,5 @@
+# Cloudflare Pages：config.js 不缓存（换了 Worker 地址立即生效），字体长缓存
+/config.js
+  Cache-Control: no-cache
+/vendor/*
+  Cache-Control: public, max-age=2592000, immutable

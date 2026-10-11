@@ -9,10 +9,10 @@
 
 import { now, esc, isOwner, tierLabel } from './util.js';
 import { getSubs, getStreamers, listMatches } from './db.js';
-import { searchTeams, teamById } from './bo3.js';
+import { searchTeams, teamById, flag } from './bo3.js';
 import { roomInfo, roomUrl } from './douyu.js';
 import { matchList } from './format.js';
-import { refreshSchedule } from './engine.js';
+import { refreshSchedule, buildDaily } from './engine.js';
 import { tg, sendMessage, editMessage, answerCallback, kb } from './tgapi.js';
 
 const TIERS = ['s', 'a', 'b', 'c'];
@@ -20,6 +20,7 @@ const TIERS = ['s', 'a', 'b', 'c'];
 const HELP_PUBLIC = [
   '<b>Sabonner</b> · CS2 比赛与斗鱼开播提醒',
   '',
+  '/today 今日赛程',
   '/next 即将开始的比赛',
   '/live 正在进行的比赛',
   '/results 最近赛果',
@@ -41,11 +42,11 @@ const HELP_OWNER = [
 ].join('\n');
 
 export const PUBLIC_COMMANDS = [
-  ['next', '即将开始的比赛'], ['live', '正在进行的比赛'], ['results', '最近赛果'],
+  ['today', '今日赛程'], ['next', '即将开始的比赛'], ['live', '正在进行的比赛'], ['results', '最近赛果'],
   ['subs', '订阅的队伍和 tier'], ['rooms', '斗鱼主播状态'], ['help', '帮助'], ['stop', '不再接收推送'],
 ];
 export const OWNER_COMMANDS = [
-  ['next', '即将开始的比赛'], ['live', '正在进行的比赛'], ['results', '最近赛果'],
+  ['today', '今日赛程'], ['next', '即将开始的比赛'], ['live', '正在进行的比赛'], ['results', '最近赛果'],
   ['subs', '订阅'], ['rooms', '斗鱼主播'], ['team', '搜索/管理队伍'], ['tier', '切换 tier'],
   ['room', '添加/管理斗鱼房间'], ['users', '用户审批'], ['refresh', '刷新赛程'], ['status', '运行状态'], ['help', '帮助'],
 ];
@@ -95,6 +96,10 @@ export async function handleUpdate(ctx, update) {
       // 管理员菜单只能在对方和 bot 有过对话后设置，所以在 owner 发 /start 时补设一次
       if (owner && cmd === 'start') await setOwnerCommands(ctx).catch(() => null);
       return reply(owner ? HELP_OWNER : HELP_PUBLIC);
+    case 'today': {
+      const t = now();
+      return reply(await buildDaily(ctx, t - (t % 86400)));
+    }
     case 'next':
       return reply(matchList('📅 <b>即将开始</b>', await listMatches(env.DB, 'upcoming', 15), ctx.tz, 'next'));
     case 'live':
@@ -139,7 +144,7 @@ export async function handleUpdate(ctx, update) {
 async function subsText(db) {
   const s = await getSubs(db);
   const tiers = s.tiers.length ? s.tiers.map(tierLabel).join(' / ') : '无';
-  const teams = s.teams.length ? s.teams.map((t) => esc(t.name)).join('、') : '无';
+  const teams = s.teams.length ? s.teams.map((t) => `${flag(t.cc)}${flag(t.cc) ? ' ' : ''}${esc(t.name)}`).join('、') : '无';
   return `<b>订阅</b>\nTier：${tiers}\n队伍：${teams}`;
 }
 
@@ -153,7 +158,7 @@ async function roomsText(db) {
 async function teamListView(db) {
   const { teams } = await getSubs(db);
   if (!teams.length) return ['还没有订阅队伍。用 /team 名字 搜索，例如 /team Spirit'];
-  return ['<b>已订阅队伍</b>（点按钮退订）', kb(teams.map((t) => [{ text: `➖ ${t.name}`, data: `t-:${t.team_id}` }]))];
+  return ['<b>已订阅队伍</b>（点按钮退订）', kb(teams.map((t) => [{ text: `➖ ${flag(t.cc)} ${t.name}`.replace('  ', ' '), data: `t-:${t.team_id}` }]))];
 }
 
 async function tierView(db) {
@@ -214,7 +219,7 @@ async function teamSearch(ctx, chat, q) {
   try { list = await searchTeams(ctx, q); } catch { return sendMessage(ctx, chat, 'bo3 搜索失败，稍后再试。'); }
   if (!list.length) return sendMessage(ctx, chat, `没找到「${esc(q)}」。试试队伍的英文全名或简称。`);
   return sendMessage(ctx, chat, `搜索「${esc(q)}」，点按钮订阅：`,
-    kb(list.map((t) => [{ text: `➕ ${t.name}${t.rank ? ` #${t.rank}` : ''}`, data: `t+:${t.id}` }])));
+    kb(list.map((t) => [{ text: `➕ ${flag(t.cc)} ${t.name}${t.rank ? ` #${t.rank}` : ''}`.replace('  ', ' '), data: `t+:${t.id}` }])));
 }
 
 async function roomAdd(ctx, chat, arg) {
@@ -227,6 +232,12 @@ async function roomAdd(ctx, chat, arg) {
     ON CONFLICT(room_id) DO UPDATE SET owner = excluded.owner, title = excluded.title`)
     .bind(id, info.owner, info.title, info.live ? 1 : 0, null, now()).run(); // changed_at 只记真实的开/下播时刻
   return sendMessage(ctx, chat, `已添加 <b>${esc(info.owner || id)}</b>（${id}），当前${info.live ? '🔴 直播中' : '未开播'}。开播时会通知所有人。`);
+}
+
+export function addTeam(db, team) {
+  return db.prepare(`INSERT INTO sub_teams (team_id, name, slug, cc, logo, added_at) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(team_id) DO UPDATE SET name = excluded.name, slug = excluded.slug, cc = excluded.cc, logo = excluded.logo`)
+    .bind(team.id, team.name, team.slug, team.cc ?? null, team.logo ?? null, now()).run();
 }
 
 // ---------- 按钮回调（只有 owner 能操作） ----------
@@ -244,7 +255,7 @@ async function handleCallback(ctx, cq) {
     case 't+': {
       const team = await teamById(ctx, Number(val)).catch(() => null);
       if (!team) return answerCallback(ctx, cq.id, '找不到这支队伍', true);
-      await db.prepare('INSERT OR IGNORE INTO sub_teams (team_id, name, slug, added_at) VALUES (?, ?, ?, ?)').bind(team.id, team.name, team.slug, now()).run();
+      await addTeam(db, team);
       const r = await refreshSchedule(ctx).catch(() => null);
       await answerCallback(ctx, cq.id, `已订阅 ${team.name}`);
       return sendMessage(ctx, chat, `已订阅 <b>${esc(team.name)}</b>。${r ? `当前跟踪 ${r.tracked} 场比赛。` : ''}`);

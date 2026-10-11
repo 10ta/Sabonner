@@ -151,8 +151,8 @@ else
 fi
 set_toml database_id "$DB_ID"
 
-wr d1 execute "$DB_NAME" --remote --file=schema.sql -y </dev/null >/dev/null
-ok "表结构已同步"
+MIG_OUT="$(wr d1 migrations apply "$DB_NAME" --remote </dev/null 2>&1)" || { echo "$MIG_OUT" | tail -20; die "数据库迁移失败"; }
+if grep -q "No migrations to apply" <<<"$MIG_OUT"; then ok "表结构已是最新"; else ok "表结构已更新"; fi
 
 # ---------- 5. bot 与管理员 ----------
 if (( RESET )) || [[ -z "$TG_TOKEN" || -z "$OWNER_ID" ]]; then
@@ -197,6 +197,15 @@ fi
 WORKER_URL="${WORKER_URL%/}"
 save_env
 ok "已部署：$WORKER_URL"
+
+# 网页读取的 Worker 地址
+CONFIG_JS="$ROOT/web/config.js"
+if [[ -f "$CONFIG_JS" ]] && ! grep -qF "'$WORKER_URL'" "$CONFIG_JS"; then
+  URL="$WORKER_URL" node -e '
+    const fs = require("fs"); const f = process.argv[1];
+    fs.writeFileSync(f, fs.readFileSync(f, "utf8").replace(/window\.SABONNER_API = .*;/, `window.SABONNER_API = ${JSON.stringify(process.env.URL).replace(/"/g, "\x27")};`));' "$CONFIG_JS"
+  ok "web/config.js 已写入 Worker 地址"
+fi
 
 # ---------- 7. secret ----------
 step "设置 secret"
@@ -247,8 +256,11 @@ ${G}${B}部署完成${N}
 
 看实时日志：  cd worker && npx wrangler tail
 以后更新：    git pull && ./init.sh
+
+网页：把仓库接到 Cloudflare Pages 和 / 或 Vercel，根目录填 web，没有构建命令（见 README「网页」一节）
 EOF
-if ! git -C "$ROOT" diff --quiet -- worker/wrangler.toml 2>/dev/null; then
+if ! git -C "$ROOT" diff --quiet -- worker/wrangler.toml web/config.js 2>/dev/null; then
   echo
-  warn "worker/wrangler.toml 已写入 database_id 和时区，建议提交：git commit -am 'config: d1 id' && git push"
+  warn "worker/wrangler.toml / web/config.js 有改动（database_id、时区、Worker 地址，都不是机密），提交后网页才会用上："
+  echo "    git add worker/wrangler.toml web/config.js && git commit -m 'config: deploy' && git push"
 fi

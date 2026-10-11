@@ -1,0 +1,372 @@
+/* 配色、字体与基础变量取自 komari-theme-1999-fork（MIT，https://github.com/10ta/komari-theme-1999-fork），
+   字体文件见 vendor/LICENSES.md。本文件只做了路径调整，组件样式在 app.css。 */
+
+@font-face {
+  font-family: 'Twemoji Country Flags';
+  src: url('vendor/fonts/TwemojiCountryFlags.woff2') format('woff2');
+  unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E0063, U+E0065, U+E0067, U+E006C, U+E006E, U+E0073-E0074, U+E0077, U+E007F;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Archivo Black';
+  src: url('vendor/fonts/archivo-black-latin-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('vendor/fonts/space-grotesk-latin-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('vendor/fonts/space-grotesk-latin-500-normal.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('vendor/fonts/space-grotesk-latin-700-normal.woff2') format('woff2');
+  font-weight: 700;
+  font-display: swap;
+}
+
+:root {
+  --black: #000000;
+  --white: #ffffff;
+  --shadow: #000000;
+  --bg: #f5f5f5;
+  --card-bg: #ffffff;
+  --text: #000000;
+  --text-muted: #666666;
+
+  --accent-yellow: #FFE600;
+  --accent-red: #FF3333;
+  --accent-blue: #0066FF;
+  --accent-green: #00CC66;
+  --accent-purple: #9B5DE5;
+
+  --accent: var(--accent-yellow);
+  --border-width: 4px;
+  /* Inner lines (dividers, bars, strips, table cells) are a softened ink so the dense grid does not
+     glare; outer frames, header and buttons keep full ink. Re-derived on each surface below. */
+  --line-mix: 62%;
+  --line: var(--black);
+  --shadow-offset: 6px;
+  --space-step: 0.75rem;
+}
+
+/* === Colour schemes ===
+   Light schemes only swap the accent. Dark schemes swap the "ink on paper" pair:
+   --black is the ink (borders, text), --white is the paper (surfaces), so every
+   inverted block (black bg + white text) stays inverted in dark mode too. */
+:root {
+  --on-accent: #000000;
+  --accent-orange: #FF9F1C;
+  --hatch: rgba(0, 0, 0, 0.15);
+  --dots: rgba(102, 102, 102, 0.3);
+  --grid-line: rgba(0, 0, 0, 0.12);
+  --chart-label: #555555;
+  /* Thin lines inside the latency strip. Light schemes: paper-coloured gutters, so cells read as
+     clean tiles on any signal colour; dark schemes override with a softened ink tone. */
+  --strip-line: var(--card-bg);
+  --row-hover: rgba(255, 230, 0, 0.08);
+
+  --sig-1: #00CC66;
+  --sig-2: #8FD14F;
+  --sig-3: #FFE600;
+  --sig-4: #FF9F1C;
+  --sig-5: #FF3333;
+
+  --ping-1: #FF3333;
+  --ping-2: #00A896;
+  --ping-3: #9B5DE5;
+  --ping-4: #0066FF;
+  --ping-5: #F59E0B;
+  --ping-6: #EC4899;
+  --ping-7: #10B981;
+  --ping-8: #F97316;
+
+  --chart-cpu: #E0C900;
+  --chart-ram: #9B5DE5;
+  --chart-disk: #00A854;
+  --chart-up: #00A854;
+  --chart-down: #0066FF;
+  --chart-conn: #FF3333;
+  --chart-proc: #0066FF;
+}
+
+:root {
+  --sig-text-1: #007A3D;
+  --sig-text-2: #4A7A0C;
+  --sig-text-3: #8A6500;
+  --sig-text-4: #B04A00;
+  --sig-text-5: #C81E1E;
+}
+
+[data-scheme="red-light"] { --accent: var(--accent-red); }
+[data-scheme="blue-light"] { --accent: #0d6eff; }  /* #0066FF lifted a hair: black text 4.34 -> 4.69 */
+[data-scheme="green-light"] { --accent: var(--accent-green); }
+[data-scheme="purple-light"] { --accent: var(--accent-purple); }
+
+[data-scheme$="-dark"] {
+  color-scheme: dark;
+  --black: var(--ink);
+  --white: var(--paper);
+  --card-bg: var(--paper);
+  --text: var(--ink);
+  --hatch: rgba(255, 255, 255, 0.12);
+  --dots: rgba(255, 255, 255, 0.10);
+  --grid-line: rgba(255, 255, 255, 0.10);
+  --chart-label: var(--text-muted);
+  --strip-line: color-mix(in srgb, var(--black) 40%, var(--card-bg));
+  --row-hover: color-mix(in srgb, var(--accent) 10%, transparent);
+  --line-mix: 55%;
+
+  --sig-1: var(--accent-green);
+  --sig-2: color-mix(in srgb, var(--accent-green) 55%, var(--accent-yellow));
+  --sig-3: var(--accent-yellow);
+  --sig-4: var(--accent-orange);
+  --sig-5: var(--accent-red);
+
+  --ping-1: var(--accent-red);
+  --ping-2: var(--accent-cyan);
+  --ping-3: var(--accent-purple);
+  --ping-4: var(--accent-blue);
+  --ping-5: var(--accent-yellow);
+  --ping-6: var(--accent-pink);
+  --ping-7: var(--accent-green);
+  --ping-8: var(--accent-orange);
+
+  --sig-text-1: color-mix(in srgb, var(--sig-1) 70%, var(--ink));
+  --sig-text-2: color-mix(in srgb, var(--sig-2) 70%, var(--ink));
+  --sig-text-3: color-mix(in srgb, var(--sig-3) 70%, var(--ink));
+  --sig-text-4: color-mix(in srgb, var(--sig-4) 70%, var(--ink));
+  --sig-text-5: color-mix(in srgb, var(--sig-5) 70%, var(--ink));
+
+  --chart-cpu: var(--accent-yellow);
+  --chart-ram: var(--accent-purple);
+  --chart-disk: var(--accent-green);
+  --chart-up: var(--accent-green);
+  --chart-down: var(--accent-blue);
+  --chart-conn: var(--accent-red);
+  --chart-proc: var(--accent-cyan);
+}
+
+/* === Light palettes ===
+   Same ink-on-paper mapping as the dark schemes, but on light paper. Values checked for
+   WCAG >= 4.5:1 (body text, muted text, header text on the accent, tiered numbers). */
+[data-scheme="solarized-light"],
+[data-scheme="github-light"],
+[data-scheme="gruvbox-light"],
+[data-scheme="catppuccin-light"],
+[data-scheme="tokyonight-light"],
+[data-scheme="chelsea-light"] {
+  --black: var(--ink);
+  --white: var(--paper);
+  --card-bg: var(--paper);
+  --text: var(--ink);
+  --shadow: var(--ink);
+  --hatch: color-mix(in srgb, var(--ink) 16%, transparent);
+  --dots: color-mix(in srgb, var(--ink) 22%, transparent);
+  --grid-line: color-mix(in srgb, var(--ink) 12%, transparent);
+  --chart-label: var(--text-muted);
+  --row-hover: color-mix(in srgb, var(--accent) 12%, transparent);
+
+  --sig-1: var(--accent-green);
+  --sig-2: color-mix(in srgb, var(--accent-green) 55%, var(--accent-yellow));
+  --sig-3: var(--accent-yellow);
+  --sig-4: var(--accent-orange);
+  --sig-5: var(--accent-red);
+  --sig-text-1: color-mix(in srgb, var(--sig-1) var(--sig-text-mix), #000);
+  --sig-text-2: color-mix(in srgb, var(--sig-2) var(--sig-text-mix), #000);
+  --sig-text-3: color-mix(in srgb, var(--sig-3) var(--sig-text-mix), #000);
+  --sig-text-4: color-mix(in srgb, var(--sig-4) var(--sig-text-mix), #000);
+  --sig-text-5: color-mix(in srgb, var(--sig-5) var(--sig-text-mix), #000);
+
+  --ping-1: var(--accent-red);
+  --ping-2: var(--accent-cyan);
+  --ping-3: var(--accent-purple);
+  --ping-4: var(--accent-blue);
+  --ping-5: var(--accent-yellow);
+  --ping-6: var(--accent-pink);
+  --ping-7: var(--accent-green);
+  --ping-8: var(--accent-orange);
+
+  --chart-cpu: var(--accent-yellow);
+  --chart-ram: var(--accent-purple);
+  --chart-disk: var(--accent-green);
+  --chart-up: var(--accent-green);
+  --chart-down: var(--accent-blue);
+  --chart-conn: var(--accent-red);
+  --chart-proc: var(--accent-cyan);
+}
+
+/* Solarized Light */
+[data-scheme="solarized-light"] {
+  --ink: #073642; --paper: #fdf6e3; --bg: #eee8d5; --text-muted: #48636b; --sig-text-mix: 75%;
+  --accent: #e3bd4f; --on-accent: #073642;
+  --accent-red: #dc322f; --accent-orange: #cb4b16; --accent-yellow: #b58900; --accent-green: #859900;
+  --accent-cyan: #2aa198; --accent-blue: #268bd2; --accent-purple: #6c71c4; --accent-pink: #d33682;
+}
+
+/* GitHub Light (Primer) */
+[data-scheme="github-light"] {
+  --ink: #1f2328; --paper: #ffffff; --bg: #f6f8fa; --text-muted: #59636e; --sig-text-mix: 65%;
+  --accent: #54aeff; --on-accent: #1f2328;
+  --accent-red: #cf222e; --accent-orange: #e16f24; --accent-yellow: #d4a72c; --accent-green: #2da44e;
+  --accent-cyan: #1b7c83; --accent-blue: #0969da; --accent-purple: #8250df; --accent-pink: #bf3989;
+}
+
+/* Gruvbox Light */
+[data-scheme="gruvbox-light"] {
+  --ink: #282828; --paper: #fbf1c7; --bg: #ebdbb2; --text-muted: #665c54; --sig-text-mix: 65%;
+  --accent: #d79921; --on-accent: #282828;
+  --accent-red: #cc241d; --accent-orange: #d65d0e; --accent-yellow: #d79921; --accent-green: #98971a;
+  --accent-cyan: #689d6a; --accent-blue: #458588; --accent-purple: #b16286; --accent-pink: #b16286;
+}
+
+/* Catppuccin Latte */
+[data-scheme="catppuccin-light"] {
+  --ink: #4c4f69; --paper: #eff1f5; --bg: #e6e9ef; --text-muted: #5c5f77; --sig-text-mix: 65%;
+  --accent: #bfa0f5; --on-accent: #1e1e2e;
+  --accent-red: #d20f39; --accent-orange: #fe640b; --accent-yellow: #df8e1d; --accent-green: #40a02b;
+  --accent-cyan: #179299; --accent-blue: #1e66f5; --accent-purple: #8839ef; --accent-pink: #ea76cb;
+}
+
+/* Tokyo Night Day */
+[data-scheme="tokyonight-light"] {
+  --ink: #343b58; --paper: #e9e9ed; --bg: #e1e2e7; --text-muted: #536194; --sig-text-mix: 80%;
+  --accent: #8fb0f3; --on-accent: #1f2335;
+  --accent-red: #f52a65; --accent-orange: #b15c00; --accent-yellow: #8c6c3e; --accent-green: #587539;
+  --accent-cyan: #007197; --accent-blue: #2e7de9; --accent-purple: #7847bd; --accent-pink: #9854f1;
+}
+
+/* Chelsea: club blue / white / gold / red (#034694, #DBA111, #EE242C, #6A7AB5). */
+[data-scheme="chelsea-light"] {
+  --ink: #0a1f4a; --paper: #ffffff; --bg: #f1f2f4; --text-muted: #4b5876; --sig-text-mix: 65%;
+  --accent: #034694; --on-accent: #ffffff;
+  --accent-red: #EE242C; --accent-orange: #e8711c; --accent-yellow: #DBA111; --accent-green: #2e9d4f;
+  --accent-cyan: #1f8fb0; --accent-blue: #034694; --accent-purple: #6A7AB5; --accent-pink: #d14d86;
+}
+
+/* Deep accents (Catppuccin mauve, Tokyo Night Day blue, Chelsea blue) carry light header text, like the dark schemes. */
+/* Catppuccin Latte and Tokyo Night Day: soft, light accents carry a darker text than the body ink. */
+[data-scheme="catppuccin-light"] .header,
+[data-scheme="tokyonight-light"] .header {
+  --black: var(--on-accent);
+  --text: var(--on-accent);
+  --shadow: var(--on-accent);
+  color: var(--on-accent);
+}
+
+[data-scheme="chelsea-light"] .header {
+  --black: var(--on-accent);
+  --text: var(--on-accent);
+  --white: var(--ink);
+  --shadow: var(--on-accent);
+  color: var(--on-accent);
+}
+
+/* Tokyo Night (night) */
+[data-scheme="tokyonight-dark"] {
+  --ink: #c0caf5; --paper: #24283b; --bg: #1a1b26; --text-muted: #8690ba; --deep: #0d0e15;
+  --accent: #7aa2f7; --on-accent: #1a1b26;
+  --accent-red: #f7768e; --accent-orange: #ff9e64; --accent-yellow: #e0af68; --accent-green: #9ece6a;
+  --accent-cyan: #7dcfff; --accent-blue: #7aa2f7; --accent-purple: #bb9af7; --accent-pink: #ff007c;
+}
+
+/* Dracula */
+[data-scheme="dracula-dark"] {
+  --ink: #dedfd8; --paper: #282a36; --bg: #1e1f29; --text-muted: #8a95c9; --deep: #0e0f14;
+  --accent: #ff79c6; --on-accent: #21222c;
+  --accent-red: #ee7070; --accent-orange: #f0b070; --accent-yellow: #e3e59a; --accent-green: #6fd88e;
+  --accent-cyan: #7cd0e6; --accent-blue: #7cd0e6; --accent-purple: #c3a0f0; --accent-pink: #ff79c6;
+}
+
+/* Monokai (classic) */
+[data-scheme="monokai-dark"] {
+  --ink: #dcdccf; --paper: #272822; --bg: #1e1f1c; --text-muted: #a59f85; --deep: #0c0c0a;
+  --accent: #e6db74; --on-accent: #272822;
+  --accent-red: #ef5a8a; --accent-orange: #ec9c48; --accent-yellow: #e6db74; --accent-green: #a3cc5a;
+  --accent-cyan: #7cc8d8; --accent-blue: #7cc8d8; --accent-purple: #b49af0; --accent-pink: #ef5a8a;
+}
+
+/* Nord */
+[data-scheme="nord-dark"] {
+  --ink: #eceff4; --paper: #3b4252; --bg: #2e3440; --text-muted: #aab4c7; --deep: #1b1f27;
+  --accent: #88c0d0; --on-accent: #2e3440;
+  --accent-red: #bf616a; --accent-orange: #d08770; --accent-yellow: #ebcb8b; --accent-green: #a3be8c;
+  --accent-cyan: #8fbcbb; --accent-blue: #81a1c1; --accent-purple: #b48ead; --accent-pink: #b48ead;
+}
+
+/* Gruvbox (dark, hard) */
+[data-scheme="gruvbox-dark"] {
+  --ink: #ebdbb2; --paper: #282828; --bg: #1d2021; --text-muted: #a89984; --deep: #0b0c0c;
+  --accent: #fe8019; --on-accent: #1d2021;
+  --accent-red: #fb4934; --accent-orange: #fe8019; --accent-yellow: #fabd2f; --accent-green: #b8bb26;
+  --accent-cyan: #8ec07c; --accent-blue: #83a598; --accent-purple: #d3869b; --accent-pink: #d3869b;
+}
+
+/* Catppuccin Mocha */
+[data-scheme="catppuccin-dark"] {
+  --ink: #cdd6f4; --paper: #1e1e2e; --bg: #181825; --text-muted: #9399b2; --deep: #0b0b12;
+  --accent: #cba6f7; --on-accent: #1e1e2e;
+  --accent-red: #f38ba8; --accent-orange: #fab387; --accent-yellow: #f9e2af; --accent-green: #a6e3a1;
+  --accent-cyan: #94e2d5; --accent-blue: #89b4fa; --accent-purple: #cba6f7; --accent-pink: #f5c2e7;
+}
+
+/* PSG: club navy / red / gold (#004170, #DA291C, #CEAB5D). Cards sit on a deeper, greyer midnight navy
+   (#0e2a4a) so white text and lines do not vibrate on saturated blue; club red stays on the header. */
+[data-scheme="psg-dark"] {
+  --ink: #e8edf3; --paper: #0e2a4a; --bg: #091d36; --text-muted: #9fb3cc; --deep: #051222;
+  --accent: #DA291C; --on-accent: #ffffff;
+  --accent-red: #f26a5e; --accent-orange: #ef8a3c; --accent-yellow: #CEAB5D; --accent-green: #5fbf7a;
+  --accent-cyan: #5cc4e0; --accent-blue: #6aa6e8; --accent-purple: #b49be8; --accent-pink: #f08aa6;
+}
+
+/* samalive: teal-and-orange grading taken from the photographer's work - shadows and sky pushed to
+   teal (#233844 / #537887 / #b2c7cf), only sunlit skin, knitwear and leaves stay warm orange/peach. */
+[data-scheme="samalive-dark"] {
+  --ink: #dce8ec; --paper: #1f333d; --bg: #16262e; --text-muted: #93adb8; --deep: #0d181d;
+  --accent: #e0913a; --on-accent: #16262e;
+  --accent-red: #e06a4f; --accent-orange: #e0913a; --accent-yellow: #e8c27a; --accent-green: #8fbf9a;
+  --accent-cyan: #7fb8c9; --accent-blue: #7aa3c4; --accent-purple: #a99bc9; --accent-pink: #eab09a;
+}
+
+/* Dark schemes: hard shadows take a dim tint of the accent so cards keep their offset depth. */
+[data-scheme$="-dark"] {
+  --shadow: color-mix(in srgb, var(--accent) 38%, var(--bg));
+}
+
+/* Dark schemes: the footer is an ink block in light themes; keep it a dark band here. */
+[data-scheme$="-dark"] .footer {
+  --black: var(--deep);
+  --white: var(--ink);
+}
+
+/* Dark schemes: the accent-coloured header keeps dark ink on a bright accent, like the light themes. */
+/* Header labels sit on the accent colour in every scheme: full on-accent ink (labels are set apart by
+   size and tracking, not opacity - a translucent label fell below 4.5:1 in most schemes). */
+.header {
+  --text-muted: var(--on-accent);
+}
+
+[data-scheme$="-dark"] .header {
+  --black: var(--on-accent);
+  --text: var(--on-accent);
+  --white: var(--ink);
+  --shadow: var(--on-accent);
+  color: var(--on-accent);
+}
+
+/* PSG: white ink on a red header, so the header "paper" is the club navy instead of white-on-white. */
+[data-scheme="psg-dark"] .header {
+  --white: var(--paper);
+  --shadow: var(--deep);
+  /* Gold band between the red header and the navy body: red and blue of similar lightness side by
+     side vibrate; a lighter band separates them. */
+  border-bottom-color: var(--accent-yellow);
+}
+

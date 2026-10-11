@@ -14,7 +14,7 @@ import { now } from './util.js';
 import { getSubs, getKV, setKVStmt, recipients, upsertMatchStmt, parseMatchRow, cleanup } from './db.js';
 import { matchesByTiers, matchesByTeams, matchesByIds, gamesOf } from './bo3.js';
 import { roomInfo } from './douyu.js';
-import { preMsg, liveCard, mapEndMsg, endMsg, streamerLiveMsg } from './format.js';
+import { preMsg, liveCard, mapEndMsg, endMsg, streamerLiveMsg, dailyMsg } from './format.js';
 import { enqueue, fanout, flush } from './outbox.js';
 
 const WINDOW = 7 * 86400;        // 只跟踪 7 天内的比赛
@@ -49,6 +49,7 @@ export async function runCron(ctx) {
   }
 
   await step('remind', () => remindTick(ctx));
+  await step('daily', () => dailyTick(ctx));
   if (minute % 60 === 7) await step('cleanup', () => cleanup(db));
   await step('flush', () => flush(ctx, OUTBOX_RESERVE));
 }
@@ -78,6 +79,15 @@ export async function refreshSchedule(ctx) {
   stmts.push(db.prepare(
     `DELETE FROM matches WHERE status = 'upcoming' AND start_ts > ?${keep.length ? ` AND id NOT IN (${keep.join(',')})` : ''}`,
   ).bind(t + 600));
+  // 旧版订阅的队伍没有国旗 / 队徽，从比赛数据里补上
+  for (const st of subs.teams) {
+    if (st.cc && st.logo) continue;
+    const m = byTeam.find((x) => x.team1_id === st.team_id || x.team2_id === st.team_id);
+    if (!m) continue;
+    const side = m.team1_id === st.team_id ? 1 : 2;
+    stmts.push(db.prepare('UPDATE sub_teams SET cc = COALESCE(cc, ?), logo = COALESCE(logo, ?) WHERE team_id = ?')
+      .bind(m[`team${side}_cc`], m[`team${side}_logo`], st.team_id));
+  }
   stmts.push(setKVStmt(db, 'last_refresh', t));
   await db.batch(stmts);
   return { tracked: map.size };
@@ -107,6 +117,34 @@ export async function remindTick(ctx) {
   const items = [];
   for (const [key, m] of plan) if (got.has(key)) items.push(...fanout(to, 'send', preMsg(m, ctx.tz), m.id));
   await enqueue(db, items);
+}
+
+// ---------- 每日预报（UTC 0 点） ----------
+
+// 当天（UTC）的比赛 + 之后最近一场；也给 /today 用
+export async function buildDaily(ctx, dayStart) {
+  const db = ctx.env.DB;
+  const end = dayStart + 86400;
+  const [today, next, subs] = await db.batch([
+    db.prepare(`SELECT * FROM matches WHERE status = 'current'
+      OR (status IN ('upcoming', 'finished') AND start_ts >= ? AND start_ts < ?) ORDER BY start_ts`).bind(dayStart, end),
+    db.prepare("SELECT * FROM matches WHERE status = 'upcoming' AND start_ts >= ? ORDER BY start_ts LIMIT 1").bind(end),
+    db.prepare('SELECT team_id FROM sub_teams'),
+  ]);
+  const stars = new Set(subs.results.map((r) => r.team_id));
+  return dailyMsg(dayStart, today.results.map(parseMatchRow), next.results[0] || null, stars, ctx.tz);
+}
+
+export async function dailyTick(ctx) {
+  const t = now();
+  const dayStart = t - (t % 86400);
+  if (t - dayStart > 3600) return; // 只在 UTC 0 点后的第一个小时内发（正常是 00:00 那一分钟）
+  const day = new Date(dayStart * 1000).toISOString().slice(0, 10);
+  const got = await claim(ctx.env.DB, [`daily:${day}`]);
+  if (!got.size) return;
+  const text = await buildDaily(ctx, dayStart);
+  const to = await recipients(ctx.env);
+  await enqueue(ctx.env.DB, to.map((chat_id) => ({ chat_id, kind: 'daily', text, meta: day })));
 }
 
 // ---------- 直播轮询 ----------
