@@ -129,27 +129,61 @@ export function matchList(title, list, tz, mode) {
   return lines.join('\n');
 }
 
-// 每日预报：today 为当天比赛（按开赛时间排序），next 为之后最近的一场，stars 为订阅队伍 id
-const DAILY_MAX = 25;
-export function dailyMsg(dayStart, today, next, stars, tz) {
-  const lines = [`📋 <b>今日赛程</b> · ${fmtDate(dayStart, tz)}`];
-  if (!today.length) {
-    lines.push('', '今天没有比赛！');
-    if (next) {
-      lines.push(`下一场比赛是 ${fmtTime(next.start_ts, tz)}（${fmtDur(next.start_ts - now())}后）`,
-        headInline(next), `${vs(next, stars)} · BO${next.bo}`);
-    } else {
-      lines.push('暂时也没有已安排的比赛。');
-    }
-    return lines.join('\n');
-  }
+// 每日预报：今日 + 明日赛程（取代了提前 1 天的单条预告）
+//   today / tomorrow 按开赛时间排序；两天都没有比赛时用 next（之后最近的一场）
+//   按时间顺序列出，连续同一赛事只写一次赛事行（tier · 赛事 · 奖金 · LAN）
+const DAILY_LIMIT = 3800; // Telegram 单条消息上限 4096 个可见字符，留点余量
+const visibleLen = (html) => html.replace(/<[^>]+>/g, '').replace(/&(lt|gt|amp|quot|#39);/g, '_').length;
+const tourLine = (m) => [`${tierLabel(m.tier)} · ${esc(m.tournament || '未知赛事')}`, fmtPrize(m.prize), EVENT[m.event_type] || ''].filter(Boolean).join(' · ');
+
+function dayBlock(title, dayStart, list, stars, tz) {
   const day = fmtDate(dayStart, tz);
-  for (const m of today.slice(0, DAILY_MAX)) {
+  const blocks = [];
+  let lastTour = null;
+  for (const m of list) {
+    const lines = [];
+    const tourKey = `${m.tier}|${m.tournament}`;
+    if (tourKey !== lastTour) { lines.push('', tourLine(m)); lastTour = tourKey; }
     const nextDay = fmtDate(m.start_ts, tz) !== day ? '次日 ' : '';
-    const live = m.status === 'current' ? ' 🔴' : '';
-    lines.push('', `<b>${nextDay}${fmtClock(m.start_ts, tz)}</b>${live} · ${headInline(m)}`, `${vs(m, stars, true)} · BO${m.bo}`);
+    const mark = m.status === 'current' ? ' 🔴' : m.status === 'finished' ? ' 🏁' : '';
+    lines.push([`<b>${nextDay}${fmtClock(m.start_ts, tz)}</b>${mark}`, stage(m), starsText(m.stars)].filter(Boolean).join(' · '));
+    lines.push(m.status === 'upcoming' ? `${vs(m, stars, 'score')} · BO${m.bo}` : `${score(m, m.status === 'finished' ? 'verdict' : 'score')} · BO${m.bo}`);
+    blocks.push(lines.join('\n'));
   }
-  if (today.length > DAILY_MAX) lines.push('', `……还有 ${today.length - DAILY_MAX} 场，发送 /next 查看`);
-  lines.push('', `共 ${today.length} 场 · ⭐ 订阅的队伍 · 🤖 AI 预测的胜者`);
-  return lines.join('\n');
+  return { head: `${title} · ${day}`, blocks };
+}
+
+export function dailyMsg(dayStart, today, tomorrow, next, stars, tz) {
+  const sections = [
+    dayBlock('📋 <b>今日赛程</b>', dayStart, today, stars, tz),
+    dayBlock('📅 <b>明日赛程</b>', dayStart + 86400, tomorrow, stars, tz),
+  ];
+  const out = [];
+  let len = 0, dropped = 0;
+  const push = (text) => { out.push(text); len += visibleLen(text) + 1; };
+
+  sections.forEach((sec, i) => {
+    if (i) push('');
+    push(sec.head);
+    if (!sec.blocks.length) { push(i ? '明天没有比赛' : '今天没有比赛！'); return; }
+    for (const b of sec.blocks) {
+      if (dropped || len + visibleLen(b) > DAILY_LIMIT) { dropped++; continue; }
+      push(b);
+    }
+  });
+
+  if (!today.length && !tomorrow.length) {
+    if (next) {
+      push('');
+      push(`下一场比赛是 ${fmtTime(next.start_ts, tz)}（${fmtDur(next.start_ts - now())}后）`);
+      push(headInline(next));
+      push(`${vs(next, stars, 'score')} · BO${next.bo}`);
+    } else {
+      push('暂时也没有已安排的比赛。');
+    }
+    return out.join('\n');
+  }
+  if (dropped) push(`\n……还有 ${dropped} 场放不下，发送 /next 查看`);
+  push(`\n今天 ${today.length} 场 · 明天 ${tomorrow.length} 场 · 开赛前 30 分钟会再提醒\n⭐ 订阅的队伍 · 🤖 AI 预测的胜者和比分`);
+  return out.join('\n');
 }

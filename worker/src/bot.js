@@ -20,7 +20,7 @@ const TIERS = ['s', 'a', 'b', 'c'];
 const HELP_PUBLIC = [
   '<b>Sabonner</b> · CS2 比赛与斗鱼开播提醒',
   '',
-  '/today 今日赛程',
+  '/today 今明两天赛程',
   '/next 即将开始的比赛',
   '/live 正在进行的比赛',
   '/results 最近赛果',
@@ -43,11 +43,11 @@ const HELP_OWNER = [
 ].join('\n');
 
 export const PUBLIC_COMMANDS = [
-  ['today', '今日赛程'], ['next', '即将开始的比赛'], ['live', '正在进行的比赛'], ['results', '最近赛果'],
+  ['today', '今明两天赛程'], ['next', '即将开始的比赛'], ['live', '正在进行的比赛'], ['results', '最近赛果'],
   ['subs', '订阅的队伍和 tier'], ['rooms', '斗鱼主播状态'], ['help', '帮助'], ['stop', '不再接收推送'],
 ];
 export const OWNER_COMMANDS = [
-  ['today', '今日赛程'], ['next', '即将开始的比赛'], ['live', '正在进行的比赛'], ['results', '最近赛果'],
+  ['today', '今明两天赛程'], ['next', '即将开始的比赛'], ['live', '正在进行的比赛'], ['results', '最近赛果'],
   ['subs', '订阅'], ['rooms', '斗鱼主播'], ['team', '搜索/管理队伍'], ['tier', '切换 tier'],
   ['stars', '按星级订阅'], ['room', '添加/管理斗鱼房间'], ['users', '用户审批'], ['refresh', '刷新赛程'], ['status', '运行状态'], ['help', '帮助'],
 ];

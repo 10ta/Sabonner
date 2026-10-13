@@ -4,7 +4,7 @@
 //   斗鱼开播检查          每分钟（房间多于 12 个时分组轮转）
 //   赛程刷新              每 10 分钟（这一分钟不做直播轮询，错开 CPU）
 //   直播轮询              其余分钟，且只在有比赛进行或即将开始时
-//   赛前提醒（1 天 / 30 分） 每分钟，只查 D1，不发外部请求
+//   赛前提醒（30 分）     每分钟，只查 D1，不发外部请求（提前 1 天的预告并进了每日预报）
 //   清理                  每小时一次
 //   发件队列              最后，用掉剩余的子请求预算
 //
@@ -107,23 +107,19 @@ export async function refreshSchedule(ctx) {
   return { tracked: map.size };
 }
 
-// ---------- 赛前提醒 ----------
+// ---------- 赛前提醒（开赛前 30 分钟） ----------
+// 提前 1 天的单条预告已经取消，由每日预报的「明日赛程」代替
 
 export async function remindTick(ctx) {
   const db = ctx.env.DB;
   const t = now();
   const { results } = await db.prepare(
     "SELECT * FROM matches WHERE status = 'upcoming' AND start_ts > ? AND start_ts <= ? ORDER BY start_ts",
-  ).bind(t - 60, t + 86400 + 60).all();
+  ).bind(t - 60, t + 30 * 60 + 60).all();
   if (!results.length) return;
 
-  const plan = [];
-  for (const m of results) {
-    const left = m.start_ts - t;
-    // 进入 24 小时窗口时发一次预告；如果发现时已不足 31 分钟，就只发 30 分钟提醒
-    if (left > 31 * 60) plan.push([`d1:${m.id}`, m]);
-    else plan.push([`m30:${m.id}:${m.start_ts}`, m]);
-  }
+  // 键里带开赛时间：改期后会在新时间前 30 分钟再提醒一次
+  const plan = results.map((m) => [`m30:${m.id}:${m.start_ts}`, m]);
   const got = await claim(db, plan.map((p) => p[0]));
   if (!got.size) return;
 
@@ -133,20 +129,22 @@ export async function remindTick(ctx) {
   await enqueue(db, items);
 }
 
-// ---------- 每日预报（UTC 0 点） ----------
+// ---------- 每日预报（UTC 0 点）：今日 + 明日赛程 ----------
 
-// 当天（UTC）的比赛 + 之后最近一场；也给 /today 用
+// 当天（UTC）的比赛、第二天的比赛，两天都没有时再带上之后最近的一场；也给 /today 用
 export async function buildDaily(ctx, dayStart) {
   const db = ctx.env.DB;
   const end = dayStart + 86400;
-  const [today, next, subs] = await db.batch([
+  const [today, tomorrow, next, subs] = await db.batch([
     db.prepare(`SELECT * FROM matches WHERE status = 'current'
       OR (status IN ('upcoming', 'finished') AND start_ts >= ? AND start_ts < ?) ORDER BY start_ts`).bind(dayStart, end),
-    db.prepare("SELECT * FROM matches WHERE status = 'upcoming' AND start_ts >= ? ORDER BY start_ts LIMIT 1").bind(end),
+    db.prepare("SELECT * FROM matches WHERE status = 'upcoming' AND start_ts >= ? AND start_ts < ? ORDER BY start_ts").bind(end, end + 86400),
+    db.prepare("SELECT * FROM matches WHERE status = 'upcoming' AND start_ts >= ? ORDER BY start_ts LIMIT 1").bind(end + 86400),
     db.prepare('SELECT team_id FROM sub_teams'),
   ]);
   const stars = new Set(subs.results.map((r) => r.team_id));
-  return dailyMsg(dayStart, today.results.map(parseMatchRow), next.results[0] || null, stars, ctx.tz);
+  return dailyMsg(dayStart, today.results.map(parseMatchRow), tomorrow.results.map(parseMatchRow),
+    next.results[0] || null, stars, ctx.tz);
 }
 
 export async function dailyTick(ctx) {
