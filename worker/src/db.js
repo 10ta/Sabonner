@@ -104,7 +104,7 @@ export function upsertMatchStmt(db, m, insertOnly = false) {
 
 // 清理（每小时）：
 //   比赛：开赛超过 7 天的删掉；另外最多保留 MAX_MATCHES 行（按开赛时间留最新的），防止订阅范围太大时无限增长
-//   去重记录 30 天、发件队列 6 小时、没人引用的赛事缓存 30 天
+//   去重记录 30 天、发件队列 6 小时、没人引用的赛事缓存 30 天、消息记录 48 小时
 const MAX_MATCHES = 3000;
 export async function cleanup(db) {
   const t = now();
@@ -113,6 +113,7 @@ export async function cleanup(db) {
     db.prepare(`DELETE FROM matches WHERE id IN (SELECT id FROM matches ORDER BY start_ts DESC LIMIT -1 OFFSET ${MAX_MATCHES})`),
     db.prepare('DELETE FROM tournaments WHERE updated_at < ?').bind(t - 30 * 86400),
     db.prepare('DELETE FROM sent WHERE at < ?').bind(t - 30 * 86400),
+    db.prepare('DELETE FROM tg_msgs WHERE sent_at < ?').bind(t - 48 * 3600), // 超过 48 小时 Telegram 不让删了
     db.prepare(`DELETE FROM live_msgs WHERE match_id NOT IN (SELECT id FROM matches)
       OR match_id IN (SELECT id FROM matches WHERE status != 'current' AND updated_at < ?)`).bind(t - 3600),
     db.prepare('DELETE FROM outbox WHERE tries >= 5 OR created_at < ?').bind(t - 6 * 3600),

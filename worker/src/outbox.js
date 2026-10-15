@@ -3,7 +3,13 @@
 //   send       普通消息
 //   live_open  直播卡片首发，记下 message_id 以便后续编辑
 //   live_edit  编辑直播卡片（同一场同一聊天只保留最新一条）
-//   daily      每日预报：发出后置顶，并取消前一天的置顶
+//   daily      每日预报：发出后置顶
+//
+// 自动删除（发出成功后立即执行，和触发它的消息一起；Telegram 只能删 48 小时内的消息）：
+//   直播卡片发出       → 删这场的 30 分钟提醒
+//   比赛结束发出       → 删这场的 30 分钟提醒、直播卡片、各张地图结束消息
+//   每日预报发出       → 删之前的每日预报、置顶产生的「已置顶」提示，以及已经不在进行的比赛留下的上述消息
+// 赛果和斗鱼开播提醒保留
 
 import { now } from './util.js';
 import { sendMessage, editMessage, tg } from './tgapi.js';
@@ -16,14 +22,54 @@ export async function enqueue(db, items) {
     if (it.kind === 'live_edit') {
       stmts.push(db.prepare("DELETE FROM outbox WHERE kind = 'live_edit' AND match_id = ? AND chat_id = ?").bind(it.match_id, it.chat_id));
     }
-    stmts.push(db.prepare('INSERT INTO outbox (chat_id, kind, text, match_id, meta, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .bind(it.chat_id, it.kind, it.text, it.match_id ?? null, it.meta ?? null, t));
+    stmts.push(db.prepare('INSERT INTO outbox (chat_id, kind, text, match_id, meta, tag, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .bind(it.chat_id, it.kind, it.text, it.match_id ?? null, it.meta ?? null, it.tag ?? null, t));
   }
   await db.batch(stmts);
 }
 
 // 同一组接收人各发一份
-export const fanout = (chatIds, kind, text, match_id) => chatIds.map((chat_id) => ({ chat_id, kind, text, match_id }));
+// tag：pre / map / end，见文件开头的自动删除规则
+export const fanout = (chatIds, kind, text, match_id, tag) => chatIds.map((chat_id) => ({ chat_id, kind, text, match_id, tag }));
+
+// ---------- 自动删除 ----------
+
+const DELETABLE = 47 * 3600;           // Telegram 只能删 48 小时内的消息，留 1 小时余量
+const MATCH_TAGS = ['pre', 'live', 'map'];
+
+// 一次 flush 里的消息簿：库里已有的记录 + 本次新发出的
+class Book {
+  constructor(rows, active) { this.rows = rows; this.active = active; this.added = []; this.gone = new Set(); }
+  add(chat_id, message_id, tag, match_id) {
+    const r = { chat_id, message_id, tag, match_id: match_id ?? null, sent_at: now() };
+    this.rows.push(r); this.added.push(r);
+  }
+  // 选出这个聊天里符合条件的消息，调用 deleteMessages（一次请求最多 100 条）
+  async purge(ctx, reserve, chat_id, pick, extra = []) {
+    const key = (r) => `${r.chat_id}:${r.message_id}`;
+    const list = this.rows.filter((r) => r.chat_id === chat_id && !this.gone.has(key(r)) && pick(r));
+    const limit = now() - DELETABLE;
+    const ids = [...new Set([...list.filter((r) => r.sent_at > limit).map((r) => r.message_id), ...extra])].slice(0, 100);
+    if (ids.length) {
+      if (ctx.left() <= reserve) return; // 没预算了：记录留着，下次每日预报时一起清
+      const res = await tg(ctx, 'deleteMessages', { chat_id, message_ids: ids });
+      if (!res.ok && res.error_code !== 400) return; // 限流等：下次再删
+    }
+    for (const r of list) this.gone.add(key(r)); // 删掉了，或者已经超过 48 小时删不了
+  }
+  stmts(db) {
+    const out = [];
+    const gone = [...this.gone].map((k) => `(${k.replace(':', ',')})`);
+    if (gone.length) out.push(db.prepare(`DELETE FROM tg_msgs WHERE (chat_id, message_id) IN (VALUES ${gone.join(',')})`));
+    const add = this.added.filter((r) => !this.gone.has(`${r.chat_id}:${r.message_id}`));
+    if (add.length) {
+      out.push(db.prepare(`INSERT OR REPLACE INTO tg_msgs (chat_id, message_id, tag, match_id, sent_at) VALUES ${add.map((r) =>
+        `(${Number(r.chat_id)}, ${Number(r.message_id)}, '${r.tag}', ${r.match_id == null ? 'NULL' : Number(r.match_id)}, ${r.sent_at})`).join(', ')}`));
+    }
+    return out;
+  }
+}
+const isTrigger = (r) => r.kind === 'live_open' || r.kind === 'daily' || r.tag === 'end';
 
 export async function flush(ctx, reserve = 0) {
   const db = ctx.env.DB;
@@ -47,6 +93,18 @@ export async function flush(ctx, reserve = 0) {
     for (const p of results) pins.set(p.chat_id, p);
   }
 
+  // 会触发删除的消息：先把相关聊天的发送记录读出来
+  const trig = rows.filter(isTrigger);
+  let book = new Book([], new Set());
+  if (trig.length) {
+    const chats = [...new Set(trig.map((r) => Number(r.chat_id)))];
+    const [msgs, act] = await db.batch([
+      db.prepare(`SELECT * FROM tg_msgs WHERE chat_id IN (${chats.join(',')})`),
+      db.prepare("SELECT id FROM matches WHERE status IN ('current', 'upcoming')"),
+    ]);
+    book = new Book(msgs.results, new Set(act.results.map((r) => r.id)));
+  }
+
   const done = [];
   const retry = [];
   const opened = [];
@@ -55,13 +113,13 @@ export async function flush(ctx, reserve = 0) {
   let sent = 0;
 
   for (const row of rows) {
-    if (ctx.left() <= reserve + (row.kind === 'daily' ? 2 : 0)) break; // 日报要 3 个请求：发送、置顶、取消旧置顶
+    if (ctx.left() <= reserve + (row.kind === 'daily' ? 2 : 0)) break; // 日报要 3 个请求：发送、置顶、删旧消息
     const key = `${row.match_id}:${row.chat_id}`;
     let res;
     try {
       res = row.kind === 'daily'
-        ? await sendDaily(ctx, row, pins.get(row.chat_id), pinned)
-        : await sendRow(ctx, row, key, msgMap, openPending, opened, done);
+        ? await sendDaily(ctx, reserve, row, pins.get(row.chat_id), pinned, book)
+        : await sendRow(ctx, reserve, row, key, msgMap, openPending, opened, done, book);
     } catch (e) {
       // 网络异常：这条记一次失败，其余留到下一分钟（Telegram 大概率整体不可达）
       console.error('[outbox]', e?.message || e);
@@ -85,27 +143,41 @@ export async function flush(ctx, reserve = 0) {
   for (const [chat_id, message_id, day] of pinned) {
     stmts.push(db.prepare('INSERT OR REPLACE INTO pins (chat_id, message_id, day) VALUES (?, ?, ?)').bind(chat_id, message_id, day));
   }
+  stmts.push(...book.stmts(db));
   if (stmts.length) await db.batch(stmts);
   return { sent, pending: rows.length > done.length };
 }
 
-// 发日报 → 静默置顶 → 取消上一条日报的置顶（失败都不影响消息本身）
-async function sendDaily(ctx, row, oldPin, pinned) {
-  const res = await sendMessage(ctx, row.chat_id, row.text);
+// 发日报 → 静默置顶 → 一次删掉：前一天的日报（置顶随之消失）、刚产生的「已置顶」提示、
+// 已经结束 / 取消的比赛留下的提醒和直播卡片（正常流程漏删的兜底）
+async function sendDaily(ctx, reserve, row, oldPin, pinned, book) {
+  const chat = Number(row.chat_id);
+  const res = await sendMessage(ctx, chat, row.text);
   if (!res.ok) return res;
   const mid = res.result.message_id;
-  const pin = await tg(ctx, 'pinChatMessage', { chat_id: row.chat_id, message_id: mid, disable_notification: true });
+  book.add(chat, mid, 'daily');
+  const pin = await tg(ctx, 'pinChatMessage', { chat_id: chat, message_id: mid, disable_notification: true });
+  const extra = [];
   if (pin.ok) {
-    if (oldPin && oldPin.message_id !== mid) {
-      await tg(ctx, 'unpinChatMessage', { chat_id: row.chat_id, message_id: oldPin.message_id });
-    }
-    pinned.push([row.chat_id, mid, row.meta || '']);
+    pinned.push([chat, mid, row.meta || '']);
+    // 私聊里置顶会紧跟着产生一条「xx pinned …」的服务消息，id 就是下一个
+    extra.push(mid + 1);
   }
+  // 旧置顶已经超过 48 小时（比如中间停过几天）删不掉了，就只取消置顶
+  if (oldPin && oldPin.message_id !== mid && oldPin.day && Date.parse(oldPin.day) / 1000 < now() - 2 * 86400 && ctx.left() > reserve + 1) {
+    await tg(ctx, 'unpinChatMessage', { chat_id: chat, message_id: oldPin.message_id });
+  }
+  // 升级前的日报没有发送记录，用置顶表里的那条补上
+  if (oldPin && oldPin.message_id !== mid && !book.rows.some((r) => r.chat_id === chat && r.message_id === oldPin.message_id)) {
+    extra.push(oldPin.message_id);
+  }
+  await book.purge(ctx, reserve, chat,
+    (r) => (r.tag === 'daily' && r.message_id !== mid) || (MATCH_TAGS.includes(r.tag) && !book.active.has(r.match_id)), extra);
   return res;
 }
 
 // 发一条；返回 Telegram 响应，或 null 表示本次跳过（需要丢弃时已自行放进 done）
-async function sendRow(ctx, row, key, msgMap, openPending, opened, done) {
+async function sendRow(ctx, reserve, row, key, msgMap, openPending, opened, done, book) {
   if (row.kind === 'live_edit') {
     const mid = msgMap.get(key);
     if (!mid) {
@@ -117,10 +189,21 @@ async function sendRow(ctx, row, key, msgMap, openPending, opened, done) {
     return res;
   }
   const res = await sendMessage(ctx, row.chat_id, row.text);
-  if (res.ok && row.kind === 'live_open') {
-    opened.push([row.match_id, row.chat_id, res.result.message_id]);
-    msgMap.set(key, res.result.message_id);
+  if (!res.ok) return res;
+  const chat = Number(row.chat_id);
+  const mid = res.result.message_id;
+  const m = row.match_id;
+  if (row.kind === 'live_open') {
+    opened.push([m, chat, mid]);
+    msgMap.set(key, mid);
     openPending.delete(key);
+    book.add(chat, mid, 'live', m);
+    await book.purge(ctx, reserve, chat, (r) => r.match_id === m && r.tag === 'pre'); // 开赛了，30 分钟提醒没用了
+  } else if (row.tag === 'pre' || row.tag === 'map') {
+    book.add(chat, mid, row.tag, m);
+  } else if (row.tag === 'end') {
+    // 结束消息里已经有全部地图比分，之前的提醒、直播卡片、地图消息都删掉
+    await book.purge(ctx, reserve, chat, (r) => r.match_id === m && MATCH_TAGS.includes(r.tag));
   }
   return res;
 }

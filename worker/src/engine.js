@@ -125,7 +125,7 @@ export async function remindTick(ctx) {
 
   const to = await recipients(ctx.env);
   const items = [];
-  for (const [key, m] of plan) if (got.has(key)) items.push(...fanout(to, 'send', preMsg(m, ctx.tz), m.id));
+  for (const [key, m] of plan) if (got.has(key)) items.push(...fanout(to, 'send', preMsg(m, ctx.tz), m.id, 'pre'));
   await enqueue(db, items);
 }
 
@@ -226,13 +226,14 @@ export async function liveTick(ctx, minute) {
     const gotMaps = await claim(db, mapKeys);
     // 中途才开始跟踪（opening）时，已结束的地图静默补记；整场结束时由结束消息统一说明
     if (!opening && !done) {
-      for (const g of finishedMaps) if (gotMaps.has(`map:${m.id}:${g.n}`)) items.push(...fanout(to, 'send', mapEndMsg(m, g, m.maps), m.id));
+      for (const g of finishedMaps) if (gotMaps.has(`map:${m.id}:${g.n}`)) items.push(...fanout(to, 'send', mapEndMsg(m, g, m.maps), m.id, 'map'));
     }
 
     const changed = scoreChanged || JSON.stringify(m.maps) !== JSON.stringify(old.maps) || old.status !== f.status;
     if (opening) items.push(...fanout(to, 'live_open', liveCard(m, m.maps), m.id));
-    else if (changed) items.push(...fanout(to, 'live_edit', liveCard(m, m.maps, done), m.id));
-    if (ending) items.push(...fanout(to, 'send', endMsg(m), m.id));
+    // 结束时直播卡片会被删掉（结束消息里有全部信息），不用再编辑
+    else if (changed && !ending) items.push(...fanout(to, 'live_edit', liveCard(m, m.maps, done), m.id));
+    if (ending) items.push(...fanout(to, 'send', endMsg(m), m.id, 'end'));
 
     if (matchChanged(old, m)) stmts.push(upsertMatchStmt(db, m));
   }
