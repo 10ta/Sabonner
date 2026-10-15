@@ -4,7 +4,11 @@
   'use strict';
 
   const API = (new URLSearchParams(location.search).get('api') || window.SABONNER_API || '').replace(/\/+$/, '');
-  const REFRESH_MS = 30_000;
+  // 有比赛进行中或 30 分钟内开赛时每 30 秒拉一次数据，否则 2 分钟一次（后台赛程本来就 10 分钟才刷新）；
+  // 倒计时等文字每 30 秒在本地重绘，不用请求服务器
+  const FAST_MS = 30_000;
+  const SLOW_MS = 120_000;
+  const TICK_MS = 30_000;
 
   // ---------- 存储（隐私模式下可能不可用） ----------
   const store = {
@@ -78,14 +82,33 @@
     return j;
   }
 
-  async function load() {
+  let lastLoad = 0;
+  let lastSig = '';
+  let lastPaint = 0;
+  async function load(force = false) {
+    lastLoad = Date.now();
     try {
-      state.data = await api('/api/overview');
+      const d = await api('/api/overview');
+      // 数据没变、而且还在同一分钟内（倒计时文字也不变）就不重绘，避免队徽闪一下
+      const sig = JSON.stringify({ ...d, now: 0 });
+      const same = sig === lastSig && !state.error && Math.floor(Date.now() / 60000) === lastPaint;
+      lastSig = sig;
+      state.data = d;
       state.error = null;
+      if (same && !force) return;
     } catch (e) {
       state.error = e.message;
     }
     render();
+  }
+
+  // 现在是不是「热」时段：有比赛进行中，或 30 分钟内有比赛开始
+  function busy() {
+    const d = state.data;
+    if (!d) return true;
+    if (visible(d.live).length) return true;
+    const t = nowSec();
+    return visible(d.upcoming).some((m) => m.start - t < 1800);
   }
 
   const bothTbd = (m) => !m.team1_id && !m.team2_id;
@@ -360,6 +383,7 @@
   }
 
   function render() {
+    lastPaint = Math.floor(Date.now() / 60000);
     const d = state.data;
     const admin = !!state.token;
     $('#sec-admin').hidden = !admin;
@@ -491,7 +515,7 @@
     try {
       await fn();
       if (okText) toast(okText);
-      await load();
+      await load(true);
     } catch (e) {
       toast(e.message, true);
     } finally {
@@ -660,9 +684,11 @@
     if (document.visibilityState !== 'visible') return;
     // 正在输入时不自动刷新
     if (document.activeElement?.tagName === 'INPUT') return;
-    load();
-  }, REFRESH_MS);
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load(); });
+    if (Date.now() - lastLoad >= (busy() ? FAST_MS : SLOW_MS) - 1000) load();
+    else if (state.data && Math.floor(Date.now() / 60000) !== lastPaint) render(); // 跨分钟了才在本地重绘倒计时
+  }, TICK_MS);
+  // 切回页面时补拉一次（10 秒内刚拉过就不重复）
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Date.now() - lastLoad > 10_000) load(); });
   if (state.token) loadUsers();
   store.set('sabonner.tab', null); // 旧版选项卡的残留
   updateCurrent();

@@ -107,6 +107,7 @@ export async function flush(ctx, reserve = 0) {
 
   const done = [];
   const retry = [];
+  const blocked = new Set(); // 拉黑了 bot / 注销了的用户：本次剩下的直接跳过，结束后移出接收名单
   const opened = [];
   const pinned = [];
   const openPending = new Set(rows.filter((r) => r.kind === 'live_open').map((r) => `${r.match_id}:${r.chat_id}`));
@@ -115,6 +116,7 @@ export async function flush(ctx, reserve = 0) {
   for (const row of rows) {
     if (ctx.left() <= reserve + (row.kind === 'daily' ? 2 : 0)) break; // 日报要 3 个请求：发送、置顶、删旧消息
     const key = `${row.match_id}:${row.chat_id}`;
+    if (blocked.has(Number(row.chat_id))) { done.push(row.id); continue; }
     let res;
     try {
       res = row.kind === 'daily'
@@ -130,7 +132,8 @@ export async function flush(ctx, reserve = 0) {
 
     if (res.ok) { done.push(row.id); sent++; continue; }
     if (res.error_code === 429) { retry.push(row.id); break; } // 被限流，下分钟再来
-    if (res.error_code === 403 || res.error_code === 400) { done.push(row.id); continue; } // 用户拉黑 / 消息已删，丢弃
+    if (res.error_code === 403) { blocked.add(Number(row.chat_id)); done.push(row.id); continue; } // 用户拉黑 / 注销
+    if (res.error_code === 400) { done.push(row.id); continue; } // 消息已删等，丢弃
     retry.push(row.id);
   }
 
@@ -144,6 +147,12 @@ export async function flush(ctx, reserve = 0) {
     stmts.push(db.prepare('INSERT OR REPLACE INTO pins (chat_id, message_id, day) VALUES (?, ?, ?)').bind(chat_id, message_id, day));
   }
   stmts.push(...book.stmts(db));
+  // 拉黑的用户等同于 /stop：移出名单、清掉排队的消息（以后每条推送都不用再白发一次）；重新 /start 可再申请
+  if (blocked.size) {
+    const ids = [...blocked].join(',');
+    stmts.push(db.prepare(`DELETE FROM users WHERE tg_id IN (${ids})`));
+    stmts.push(db.prepare(`DELETE FROM outbox WHERE chat_id IN (${ids})`));
+  }
   if (stmts.length) await db.batch(stmts);
   return { sent, pending: rows.length > done.length };
 }

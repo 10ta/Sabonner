@@ -28,16 +28,19 @@ const ts = (iso) => (iso ? Math.floor(Date.parse(iso) / 1000) : null);
 
 const COUNTRY_TTL = 30 * 86400;
 
-export async function ensureCountries(ctx) {
-  if (ctx.countries) return ctx.countries;
+// 同一次调用里只加载一次：赛程刷新会并行发 4 个比赛请求，都要用国家表，
+// 以前各自去读缓存，缓存过期时会把 /countries 重复拉 4 遍
+export function ensureCountries(ctx) {
+  if (!ctx.countriesP) ctx.countriesP = loadCountries(ctx);
+  return ctx.countriesP;
+}
+
+async function loadCountries(ctx) {
   const db = ctx.env.DB;
   const row = await db.prepare("SELECT v FROM kv WHERE k = 'countries'").first();
   let cached = null;
   try { cached = row ? JSON.parse(row.v) : null; } catch { /* 坏缓存当没有 */ }
-  if (cached && cached.at > Date.now() / 1000 - COUNTRY_TTL) {
-    ctx.countries = cached.map;
-    return ctx.countries;
-  }
+  if (cached && cached.at > Date.now() / 1000 - COUNTRY_TTL) return cached.map;
   const map = cached?.map || {};
   try {
     for (let offset = 0; offset < 400; offset += 100) {
@@ -50,7 +53,6 @@ export async function ensureCountries(ctx) {
   } catch (e) {
     console.error('countries', e?.message || e); // 拿不到就先不显示国旗，不影响其它功能
   }
-  ctx.countries = map;
   return map;
 }
 
@@ -104,9 +106,13 @@ const MATCH_EXTRA = { with: WITH, sort: 'start_date' };
 const ACTIVE = ['matches.status', 'in', 'upcoming,current'];
 
 async function matches(ctx, url) {
-  const countries = await ensureCountries(ctx);
-  const list = (await get(ctx, url)).map((m) => normalizeMatch(m, countries));
-  // 线下 / 线上、HLTV 赛事页只在赛事接口里有，按赛事 id 查一次缓存一天
+  const [raw, countries] = await Promise.all([get(ctx, url), ensureCountries(ctx)]);
+  return raw.map((m) => normalizeMatch(m, countries));
+}
+
+// 补上线下 / 线上、HLTV 赛事页、奖金（只在赛事接口里有，按赛事 id 查，缓存一天）。
+// 赛程刷新把几路请求合并之后调用一次；直播轮询不调用——这些字段库里已有，合并时沿用旧值
+export async function attachTournaments(ctx, list) {
   const tours = await ensureTournaments(ctx, [...new Set(list.map((m) => m.tournament_id).filter(Boolean))]);
   for (const m of list) {
     const t = tours.get(m.tournament_id);

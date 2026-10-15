@@ -15,7 +15,7 @@
 //     POST   refresh                  立即刷新赛程
 
 import { json, now, safeEqual } from './util.js';
-import { getSubs, getStreamers, listMatches, getKV } from './db.js';
+import { getSubs, listMatches, matchesStmt, subsStmts, subsFrom, parseMatchRow } from './db.js';
 import { matchUrl, stagesUrl, searchTeams, teamById } from './bo3.js';
 import { roomInfo } from './douyu.js';
 import { refreshSchedule } from './engine.js';
@@ -54,10 +54,17 @@ export async function handleApi(req, env, path, ctx) {
     return json({ scope, now: now(), matches: list.map(pubMatch) }, 200, cache);
   }
   if (path === '/api/overview') {
-    const [upcoming, live, results, subs, rooms, last] = await Promise.all([
-      listMatches(db, 'upcoming', 40), listMatches(db, 'live'), listMatches(db, 'results', 30),
-      getSubs(db), getStreamers(db), getKV(db, 'last_refresh'),
+    // 一次 batch 发完所有查询（以前是 6 次 D1 往返）
+    const res = await db.batch([
+      matchesStmt(db, 'upcoming', 40), matchesStmt(db, 'live'), matchesStmt(db, 'results', 30),
+      db.prepare('SELECT * FROM streamers ORDER BY live DESC, room_id'),
+      db.prepare("SELECT v FROM kv WHERE k = 'last_refresh'"),
+      ...subsStmts(db),
     ]);
+    const [upcoming, live, results] = res.slice(0, 3).map((r) => r.results.map(parseMatchRow));
+    const rooms = res[3].results;
+    const last = res[4].results[0]?.v;
+    const subs = subsFrom(res.slice(5));
     return json({
       now: now(),
       tz: env.TZ || 'Asia/Shanghai',
@@ -152,7 +159,10 @@ async function handleAdmin(req, env, sub, ctx) {
       const u = await db.prepare('SELECT status FROM users WHERE tg_id = ?').bind(id).first();
       if (!u) return json({ error: '用户不存在' }, 404);
       const approve = parts[2] === 'approve';
-      await db.prepare('UPDATE users SET status = ? WHERE tg_id = ?').bind(approve ? 'approved' : 'denied', id).run();
+      await db.batch([
+        db.prepare('UPDATE users SET status = ? WHERE tg_id = ?').bind(approve ? 'approved' : 'denied', id),
+        ...(approve ? [] : [db.prepare('DELETE FROM outbox WHERE chat_id = ?').bind(id)]), // 撤销后排队的推送也不再发
+      ]);
       if (approve && u.status !== 'approved') await sendMessage(ctx, id, '✅ 申请已通过，之后会收到比赛和开播推送。发送 /help 查看命令。').catch(() => null);
       if (!approve && u.status === 'approved') await sendMessage(ctx, id, '你的推送权限已被撤销。').catch(() => null);
       return json({ ok: true });

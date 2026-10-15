@@ -11,8 +11,8 @@
 // 所有事件都先 claim 去重键，再入队，保证同一事件只推一次。
 
 import { now } from './util.js';
-import { getSubs, getKV, setKVStmt, recipients, upsertMatchStmt, matchChanged, parseMatchRow, cleanup } from './db.js';
-import { matchesByTiers, matchesByTeams, matchesByStars, matchesByIds } from './bo3.js';
+import { getSubs, getKV, setKVStmt, recipients, upsertMatchStmt, matchChanged, parseMatchRow, cleanup, KEEP_OLD } from './db.js';
+import { matchesByTiers, matchesByTeams, matchesByStars, matchesByIds, attachTournaments } from './bo3.js';
 import { roomInfo } from './douyu.js';
 import { preMsg, liveCard, mapEndMsg, endMsg, streamerLiveMsg, dailyMsg } from './format.js';
 import { enqueue, fanout, flush } from './outbox.js';
@@ -74,6 +74,7 @@ export async function refreshSchedule(ctx) {
     if (!m.team1_id && !m.team2_id) continue; // 两队都未定（TBD vs TBD）不跟踪；对阵确定后下次刷新自动补上
     if (m.status === 'current' || (m.status === 'upcoming' && m.start_ts <= t + WINDOW)) map.set(m.id, m);
   }
+  await attachTournaments(ctx, [...map.values()]); // 合并去重之后只查一次赛事信息
 
   // 只写有变化的比赛：先把库里现有的这些行读出来对比（读的额度比写宽得多）
   const existing = new Map();
@@ -152,9 +153,12 @@ export async function dailyTick(ctx) {
   const dayStart = t - (t % 86400);
   if (t - dayStart > 3600) return; // 只在 UTC 0 点后的第一个小时内发（正常是 00:00 那一分钟）
   const day = new Date(dayStart * 1000).toISOString().slice(0, 10);
-  const got = await claim(ctx.env.DB, [`daily:${day}`]);
-  if (!got.size) return;
+  const key = `daily:${day}`;
+  if (await ctx.env.DB.prepare('SELECT 1 FROM sent WHERE key = ?').bind(key).first()) return;
+  // 先生成再领取：生成时出错的话这一分钟不算数，下一分钟重试，不会丢掉当天的预报
   const text = await buildDaily(ctx, dayStart);
+  const got = await claim(ctx.env.DB, [key]);
+  if (!got.size) return;
   const to = await recipients(ctx.env);
   await enqueue(ctx.env.DB, to.map((chat_id) => ({ chat_id, kind: 'daily', text, meta: day })));
 }
@@ -173,20 +177,26 @@ export function seriesDecided(m) {
   return Math.max(s1, s2) > bo / 2 || s1 + s2 >= bo;
 }
 
+// 开赛 6 小时后 bo3 还标着「未开始」的比赛（多半是取消了没更新），每 10 分钟才查一次，
+// 免得一场「僵尸比赛」让直播轮询每分钟都去请求 bo3
+const STALE_UPCOMING = 6 * 3600;
+
 export async function liveTick(ctx, minute) {
   const db = ctx.env.DB;
   const t = now();
+  // 开赛前 30 分钟起就纳入轮询（按 id 一次查完，不多花请求），提前开赛也能及时发现
   const { results } = await db.prepare(
-    "SELECT * FROM matches WHERE status = 'current' OR (status = 'upcoming' AND start_ts <= ?)",
-  ).bind(t + 1800).all(); // 开赛前 30 分钟起就纳入轮询（按 id 一次查完，不多花请求），提前开赛也能及时发现
+    `SELECT * FROM matches WHERE status = 'current'
+      OR (status = 'upcoming' AND start_ts <= ?${minute % 10 === 5 ? '' : ' AND start_ts > ?'})`,
+  ).bind(...(minute % 10 === 5 ? [t + 1800] : [t + 1800, t - STALE_UPCOMING])).all();
   if (!results.length) return;
 
   const olds = results.map(parseMatchRow);
   const fresh = new Map((await matchesByIds(ctx, olds.map((m) => m.id))).map((m) => [m.id, m]));
-  const to = await recipients(ctx.env);
-  const items = [];
   const stmts = [];
 
+  // 第一遍：算出每场的新状态和要领取的去重键
+  const plans = [];
   for (const old of olds) {
     const f = fresh.get(old.id);
     if (!f) {
@@ -202,39 +212,40 @@ export async function liveTick(ctx, minute) {
       f.status = 'finished';
       if (!f.winner_id && f.s1 !== f.s2) f.winner_id = f.s1 > f.s2 ? f.team1_id : f.team2_id;
     }
-    const live = f.status === 'current';
-    const done = TERMINAL(f.status);
-    const m = { ...old, ...f, maps: f.maps ?? old.maps }; // 地图数据随比赛一起返回
+    // 地图、赛事信息（线下 / 线上、HLTV、奖金）这次没拿到时沿用库里的
+    const m = { ...old, ...f };
+    for (const k of KEEP_OLD) if (f[k] == null) m[k] = old[k];
 
+    const live = m.status === 'current';
+    const done = TERMINAL(m.status);
     if (!live && !done) { // 仍是 upcoming（延迟开赛），只同步时间等字段
       if (matchChanged(old, m)) stmts.push(upsertMatchStmt(db, m));
       continue;
     }
-
-    const claims = [];
-    if (live) claims.push(`open:${m.id}`);
-    if (done) claims.push(`end:${m.id}`);
-    const got0 = await claim(db, claims);
-    const opening = got0.has(`open:${m.id}`);
-    const ending = got0.has(`end:${m.id}`);
-
-    const scoreChanged = f.s1 !== old.s1 || f.s2 !== old.s2;
-
     // 新打完的地图：bo3 会先把地图标成 finished、过一会儿才填比分，比分到了才算（否则消息里只有「—」）
     const finishedMaps = (m.maps || []).filter((g) => g.status === 'finished' && g.sc1 != null);
-    const mapKeys = finishedMaps.map((g) => `map:${m.id}:${g.n}`);
-    const gotMaps = await claim(db, mapKeys);
+    const keys = [...(live ? [`open:${m.id}`] : []), ...(done ? [`end:${m.id}`] : []), ...finishedMaps.map((g) => `map:${m.id}:${g.n}`)];
+    plans.push({ old, m, live, done, finishedMaps, keys });
+  }
+
+  // 所有比赛的去重键一次领完（以前每场两次 D1 往返）
+  const got = await claim(db, plans.flatMap((p) => p.keys));
+  const to = plans.length ? await recipients(ctx.env) : [];
+  const items = [];
+
+  // 第二遍：按领到的键生成消息
+  for (const { old, m, done, finishedMaps } of plans) {
+    const opening = got.has(`open:${m.id}`);
+    const ending = got.has(`end:${m.id}`);
     // 中途才开始跟踪（opening）时，已结束的地图静默补记；整场结束时由结束消息统一说明
     if (!opening && !done) {
-      for (const g of finishedMaps) if (gotMaps.has(`map:${m.id}:${g.n}`)) items.push(...fanout(to, 'send', mapEndMsg(m, g, m.maps), m.id, 'map'));
+      for (const g of finishedMaps) if (got.has(`map:${m.id}:${g.n}`)) items.push(...fanout(to, 'send', mapEndMsg(m, g, m.maps), m.id, 'map'));
     }
-
-    const changed = scoreChanged || JSON.stringify(m.maps) !== JSON.stringify(old.maps) || old.status !== f.status;
+    const changed = m.s1 !== old.s1 || m.s2 !== old.s2 || JSON.stringify(m.maps) !== JSON.stringify(old.maps) || old.status !== m.status;
     if (opening) items.push(...fanout(to, 'live_open', liveCard(m, m.maps), m.id));
     // 结束时直播卡片会被删掉（结束消息里有全部信息），不用再编辑
     else if (changed && !ending) items.push(...fanout(to, 'live_edit', liveCard(m, m.maps, done), m.id));
     if (ending) items.push(...fanout(to, 'send', endMsg(m), m.id, 'end'));
-
     if (matchChanged(old, m)) stmts.push(upsertMatchStmt(db, m));
   }
 

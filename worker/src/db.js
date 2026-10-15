@@ -25,17 +25,20 @@ export async function recipients(env) {
   return [...ids];
 }
 
+// 订阅：3 条查询，可以拼进别的 batch 一起发（见 api.js 的 overview）
+export const subsStmts = (db) => [
+  db.prepare('SELECT tier FROM sub_tiers ORDER BY tier'),
+  db.prepare('SELECT team_id, name, slug, cc, logo FROM sub_teams ORDER BY name COLLATE NOCASE'),
+  db.prepare("SELECT v FROM kv WHERE k = 'sub_stars'"),
+];
+export const subsFrom = ([tiers, teams, stars]) => ({
+  tiers: tiers.results.map((r) => r.tier),
+  teams: teams.results,
+  stars: Number(stars.results[0]?.v) || 0, // 星级 ≥ 这个数的比赛都订阅；0 表示不按星级订阅
+});
+
 export async function getSubs(db) {
-  const [tiers, teams, stars] = await db.batch([
-    db.prepare('SELECT tier FROM sub_tiers ORDER BY tier'),
-    db.prepare('SELECT team_id, name, slug, cc, logo FROM sub_teams ORDER BY name COLLATE NOCASE'),
-    db.prepare("SELECT v FROM kv WHERE k = 'sub_stars'"),
-  ]);
-  return {
-    tiers: tiers.results.map((r) => r.tier),
-    teams: teams.results,
-    stars: Number(stars.results[0]?.v) || 0, // 星级 ≥ 这个数的比赛都订阅；0 表示不按星级订阅
-  };
+  return subsFrom(await db.batch(subsStmts(db)));
 }
 
 export async function getStreamers(db) {
@@ -48,7 +51,7 @@ export async function getMatch(db, id) {
 }
 
 // scope: upcoming / live / results
-export async function listMatches(db, scope, limit = 30) {
+export function matchesStmt(db, scope, limit = 30) {
   const t = now();
   let sql;
   if (scope === 'live') {
@@ -58,7 +61,11 @@ export async function listMatches(db, scope, limit = 30) {
   } else {
     sql = `SELECT * FROM matches WHERE status = 'upcoming' AND start_ts > ${t - 3600} ORDER BY start_ts LIMIT ${limit}`;
   }
-  const { results } = await db.prepare(sql).all();
+  return db.prepare(sql);
+}
+
+export async function listMatches(db, scope, limit = 30) {
+  const { results } = await matchesStmt(db, scope, limit).all();
   return results.map(parseMatchRow);
 }
 
@@ -76,7 +83,7 @@ const COLS = ['id', 'slug', 'team1_id', 'team2_id', 'team1', 'team2', 'team1_cc'
   'bo', 'start_ts', 'status', 's1', 's2', 'winner_id', 'ai_winner_id', 'ai_s1', 'ai_s2', 'maps', 'updated_at'];
 // maps 为空时保留旧值；其余字段以新数据为准
 // 这些字段拿不到时（如赛事接口偶尔失败）保留旧值，不用 null 覆盖
-const KEEP_OLD = new Set(['maps', 'event_type', 'tournament_hltv', 'prize']);
+export const KEEP_OLD = new Set(['maps', 'event_type', 'tournament_hltv', 'prize']);
 const UPSERT_UPDATE = `ON CONFLICT(id) DO UPDATE SET ${COLS.filter((c) => c !== 'id').map((c) =>
   (KEEP_OLD.has(c) ? `${c} = COALESCE(excluded.${c}, matches.${c})` : `${c} = excluded.${c}`)).join(', ')}`;
 const UPSERT_SQL = `INSERT INTO matches (${COLS.join(', ')}) VALUES (${COLS.map((_, i) => `?${i + 1}`).join(', ')})`;

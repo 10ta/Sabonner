@@ -113,7 +113,10 @@ export async function handleUpdate(ctx, update) {
       return reply(await roomsText(env.DB));
     case 'stop':
       if (owner) return reply('你是管理员，推送无法关闭。');
-      await env.DB.prepare('DELETE FROM users WHERE tg_id = ?').bind(from.id).run();
+      await env.DB.batch([
+        env.DB.prepare('DELETE FROM users WHERE tg_id = ?').bind(from.id),
+        env.DB.prepare('DELETE FROM outbox WHERE chat_id = ?').bind(from.id), // 排队中的推送也不再发
+      ]);
       return reply('已停止推送。想恢复的话重新发送 /start 申请。');
   }
 
@@ -317,7 +320,10 @@ async function handleCallback(ctx, cq) {
     case 'u-': {
       const id = Number(val);
       const u = await db.prepare('SELECT status FROM users WHERE tg_id = ?').bind(id).first();
-      await db.prepare("UPDATE users SET status = 'denied' WHERE tg_id = ?").bind(id).run();
+      await db.batch([
+        db.prepare("UPDATE users SET status = 'denied' WHERE tg_id = ?").bind(id),
+        db.prepare('DELETE FROM outbox WHERE chat_id = ?').bind(id),
+      ]);
       if (u?.status === 'approved') await sendMessage(ctx, id, '你的推送权限已被撤销。');
       await answerCallback(ctx, cq.id, u?.status === 'approved' ? '已撤销' : '已拒绝');
       return rerender(await usersView(db));
