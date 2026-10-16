@@ -72,8 +72,10 @@ export async function listMatches(db, scope, limit = 30) {
 export function parseMatchRow(r) {
   if (!r) return r;
   let maps = [];
+  let stats = null;
   try { maps = r.maps ? JSON.parse(r.maps) : []; } catch { /* 坏数据当空 */ }
-  return { ...r, maps };
+  try { stats = r.stats ? JSON.parse(r.stats) : null; } catch { /* 同上 */ }
+  return { ...r, maps, stats };
 }
 
 // insertOnly：只插入新比赛，不覆盖已有行。赛程刷新遇到进行中的比赛时用——

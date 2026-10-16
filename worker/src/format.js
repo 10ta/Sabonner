@@ -135,6 +135,33 @@ export function mapEndMsg(m, g, maps = [g]) {
   return [title, head(m), scoreBlock({ ...m, status: 'current' }, null, 'score'), mapsBlock(m, done.length ? done : [g])].filter(Boolean).join('\n');
 }
 
+// ---------- 记分板（赛后数据） ----------
+// 等宽表格，手机上一行约 32 个字符：选手 K D A +/- ADR，最后一行合计（ADR 取平均）
+const padR = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s + ' '.repeat(n - s.length));
+const padL = (s, n) => ' '.repeat(Math.max(0, n - String(s).length)) + s;
+const signed = (n) => (n > 0 ? `+${n}` : String(n));
+export function statsRows(stats, side) {
+  return stats.filter((p) => p.side === side).sort((a, b) => b.k - a.k || a.d - b.d);
+}
+function scoreboard(m) {
+  if (!Array.isArray(m.stats) || !m.stats.length) return '';
+  const row = (n, k, d, a, pm, adr) => `${padR(n, 11)}${padL(k, 3)}${padL(d, 4)}${padL(a, 4)}${padL(pm, 5)}${padL(adr, 5)}`;
+  return [1, 2].map((side) => {
+    const ps = statsRows(m.stats, side);
+    if (!ps.length) return '';
+    const sum = (f) => ps.reduce((x, p) => x + (p[f] || 0), 0);
+    const adrs = ps.filter((p) => p.adr != null);
+    const lines = [
+      row('', 'K', 'D', 'A', '+/-', 'ADR'),
+      ...ps.map((p) => row(p.n, p.k, p.d, p.a, signed(p.k - p.d), p.adr ?? '-')),
+      row('Total', sum('k'), sum('d'), sum('a'), signed(sum('k') - sum('d')), adrs.length ? Math.round(adrs.reduce((x, p) => x + p.adr, 0) / adrs.length) : '-'),
+    ];
+    const f = flag(side === 1 ? m.team1_cc : m.team2_cc);
+    return `📊 ${f ? f + ' ' : ''}<b>${esc(side === 1 ? m.team1 : m.team2)}</b>\n<pre>${esc(lines.join('\n'))}</pre>`;
+  }).filter(Boolean).join('\n');
+}
+
+// 赛后数据到了之后会把已发出的结束消息编辑成带记分板的版本（见 engine.js statsTick）
 export function endMsg(m) {
   const w = winnerSide(m);
   const name = w === 1 ? m.team1 : w === 2 ? m.team2 : '';
@@ -143,6 +170,7 @@ export function endMsg(m) {
     head(m),
     scoreBlock({ ...m, status: 'finished' }, null, 'verdict'),
     mapsBlock(m, m.maps, true),
+    scoreboard(m),
     links(m),
   ].filter(Boolean).join('\n');
 }

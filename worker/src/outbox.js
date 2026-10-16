@@ -3,6 +3,7 @@
 //   send       普通消息
 //   live_open  直播卡片首发，记下 message_id 以便后续编辑
 //   live_edit  编辑直播卡片（同一场同一聊天只保留最新一条）
+//   end_edit   赛后数据到了，给已发出的结束消息补上记分板
 //   daily      每日预报：发出后置顶
 //
 // 自动删除（发出成功后立即执行，和触发它的消息一起；Telegram 只能删 48 小时内的消息）：
@@ -93,6 +94,14 @@ export async function flush(ctx, reserve = 0) {
     for (const p of results) pins.set(p.chat_id, p);
   }
 
+  // 结束消息的 message_id（编辑加记分板用）
+  const endIds = new Map();
+  const editMatches = [...new Set(rows.filter((r) => r.kind === 'end_edit').map((r) => Number(r.match_id)))];
+  if (editMatches.length) {
+    const { results } = await db.prepare(`SELECT chat_id, message_id, match_id FROM tg_msgs WHERE tag = 'end' AND match_id IN (${editMatches.join(',')})`).all();
+    for (const r of results) endIds.set(`${r.match_id}:${r.chat_id}`, r.message_id);
+  }
+
   // 会触发删除的消息：先把相关聊天的发送记录读出来
   const trig = rows.filter(isTrigger);
   let book = new Book([], new Set());
@@ -121,7 +130,7 @@ export async function flush(ctx, reserve = 0) {
     try {
       res = row.kind === 'daily'
         ? await sendDaily(ctx, reserve, row, pins.get(row.chat_id), pinned, book)
-        : await sendRow(ctx, reserve, row, key, msgMap, openPending, opened, done, book);
+        : await sendRow(ctx, reserve, row, key, msgMap, openPending, opened, done, book, endIds);
     } catch (e) {
       // 网络异常：这条记一次失败，其余留到下一分钟（Telegram 大概率整体不可达）
       console.error('[outbox]', e?.message || e);
@@ -186,7 +195,14 @@ async function sendDaily(ctx, reserve, row, oldPin, pinned, book) {
 }
 
 // 发一条；返回 Telegram 响应，或 null 表示本次跳过（需要丢弃时已自行放进 done）
-async function sendRow(ctx, reserve, row, key, msgMap, openPending, opened, done, book) {
+async function sendRow(ctx, reserve, row, key, msgMap, openPending, opened, done, book, endIds) {
+  if (row.kind === 'end_edit') { // 给已发出的结束消息补上记分板；找不到（太久、已删）就算了
+    const mid = endIds.get(key);
+    if (!mid) { done.push(row.id); return null; }
+    const res = await editMessage(ctx, row.chat_id, mid, row.text);
+    if (!res.ok && /not modified/i.test(res.description || '')) return { ok: true };
+    return res;
+  }
   if (row.kind === 'live_edit') {
     const mid = msgMap.get(key);
     if (!mid) {
@@ -211,6 +227,8 @@ async function sendRow(ctx, reserve, row, key, msgMap, openPending, opened, done
   } else if (row.tag === 'pre' || row.tag === 'map') {
     book.add(chat, mid, row.tag, m);
   } else if (row.tag === 'end') {
+    book.add(chat, mid, 'end', m); // 记下来：赛后数据出来后要编辑这条，加上记分板
+    endIds.set(`${m}:${chat}`, mid);
     // 结束消息里已经有全部地图比分，之前的提醒、直播卡片、地图消息都删掉
     await book.purge(ctx, reserve, chat, (r) => r.match_id === m && MATCH_TAGS.includes(r.tag));
   }

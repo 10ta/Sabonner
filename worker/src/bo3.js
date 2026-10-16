@@ -96,6 +96,7 @@ export function normalizeMatch(m, countries = {}) {
     ai_winner_id: ai?.prediction_winner_team_id ?? null,
     ai_s1: ai?.prediction_team1_score ?? null,
     ai_s2: ai?.prediction_team2_score ?? null,
+    parsed: m.parsed_status || null, // done = demo 已解析，赛后数据可取
   };
   if (Array.isArray(m.games)) out.maps = mapsFromGames(m.games, out);
   return out;
@@ -224,6 +225,29 @@ export function mapsFromGames(games, match) {
       }
       return out;
     });
+}
+
+// ---------- 赛后数据 ----------
+// /matches/{slug}/players_stats：整场比赛每名选手的合计数据（demo 解析完之前返回 []）
+// 只留网页和 TG 用得到的：选手、国籍、K / D / A、ADR
+export async function matchStats(ctx, m) {
+  const r = await ctx.fetch(`${BASE}/matches/${encodeURIComponent(m.slug)}/players_stats`, { headers: HEADERS });
+  if (!r.ok) throw new Error(`bo3 ${r.status} players_stats`);
+  const list = await r.json();
+  if (!Array.isArray(list)) return [];
+  return list.map((p) => {
+    const tid = p.team_clan?.team_id;
+    let side = tid && tid === m.team1_id ? 1 : tid && tid === m.team2_id ? 2 : 0;
+    if (!side) side = whichSide(p.clan_name, m);
+    const pl = p.steam_profile?.player;
+    return {
+      side,
+      n: pl?.nickname || p.steam_profile?.nickname || '?',
+      cc: pl?.country?.code ? String(pl.country.code).toUpperCase() : null,
+      k: p.kills ?? 0, d: p.death ?? 0, a: p.assists ?? 0,
+      adr: p.adr != null ? Math.round(p.adr) : null,
+    };
+  }).filter((p) => p.side);
 }
 
 const teamOut = (t, countries) => ({ id: t.id, name: t.name, slug: t.slug, cc: countries[t.country_id] || null, logo: t.image_url || null });

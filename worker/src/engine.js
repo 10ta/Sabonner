@@ -12,7 +12,7 @@
 
 import { now } from './util.js';
 import { getSubs, getKV, setKVStmt, recipients, upsertMatchStmt, matchChanged, parseMatchRow, cleanup, KEEP_OLD } from './db.js';
-import { matchesByTiers, matchesByTeams, matchesByStars, matchesByIds, attachTournaments } from './bo3.js';
+import { matchesByTiers, matchesByTeams, matchesByStars, matchesByIds, attachTournaments, matchStats } from './bo3.js';
 import { roomInfo } from './douyu.js';
 import { preMsg, liveCard, mapEndMsg, endMsg, streamerLiveMsg, dailyMsg } from './format.js';
 import { enqueue, fanout, flush } from './outbox.js';
@@ -47,6 +47,7 @@ export async function runCron(ctx) {
     await step('live', () => liveTick(ctx, minute));
   }
 
+  if (minute % 10 === 3) await step('stats', () => statsTick(ctx));
   await step('remind', () => remindTick(ctx));
   await step('daily', () => dailyTick(ctx));
   if (minute % 60 === 7) await step('cleanup', () => cleanup(db));
@@ -181,6 +182,17 @@ export function seriesDecided(m) {
 // 免得一场「僵尸比赛」让直播轮询每分钟都去请求 bo3
 const STALE_UPCOMING = 6 * 3600;
 
+// 比赛已结束但最后一张图比分迟迟不来时，最多等这么久再发结束消息
+const MAP_WAIT = 20 * 60;
+
+// 第一次发现「已结束但缺比分」时记下时间（借用去重表），之后对比是否等够了
+async function waitedTooLong(db, id, t) {
+  const key = `endwait:${id}`;
+  await db.prepare('INSERT OR IGNORE INTO sent (key, at) VALUES (?, ?)').bind(key, t).run();
+  const r = await db.prepare('SELECT at FROM sent WHERE key = ?').bind(key).first();
+  return !r || t - r.at >= MAP_WAIT;
+}
+
 export async function liveTick(ctx, minute) {
   const db = ctx.env.DB;
   const t = now();
@@ -205,12 +217,18 @@ export async function liveTick(ctx, minute) {
       continue;
     }
 
-    // bo3 还标着进行中、但大比分已分出胜负：当作已结束（胜者按比分定）
-    // 等决胜图的比分也到了再判（否则结束消息里会少最后一张图）
-    const scored = (f.maps ?? old.maps ?? []).filter((g) => g.status === 'finished' && g.sc1 != null).length;
-    if (f.status === 'current' && seriesDecided(f) && scored >= (Number(f.s1) || 0) + (Number(f.s2) || 0)) {
+    // 结束消息要带上每张图的比分。bo3 打完决胜图后，比赛状态和最后一张图的比分谁先更新不一定：
+    //   ① 状态还是进行中、大比分已分出胜负 → 等最后一张图比分到了就当作结束（不用等 bo3 改状态）
+    //   ② 状态已经是 finished、最后一张图比分还没到 → 先按进行中处理，等比分到了再发结束
+    // 完全没有地图数据的比赛（bo3 没做逐图直播）不等；比分一直不来的，最多等 MAP_WAIT 后照常发
+    const mapsNow = f.maps ?? old.maps ?? [];
+    const scored = mapsNow.filter((g) => g.status === 'finished' && g.sc1 != null).length;
+    const mapsComplete = !mapsNow.length || scored >= (Number(f.s1) || 0) + (Number(f.s2) || 0);
+    if (f.status === 'current' && seriesDecided(f) && mapsComplete) {
       f.status = 'finished';
       if (!f.winner_id && f.s1 !== f.s2) f.winner_id = f.s1 > f.s2 ? f.team1_id : f.team2_id;
+    } else if (f.status === 'finished' && !mapsComplete && !(await waitedTooLong(db, f.id, t))) {
+      f.status = 'current'; // 库里保持进行中，下一分钟继续轮询
     }
     // 地图、赛事信息（线下 / 线上、HLTV、奖金）这次没拿到时沿用库里的
     const m = { ...old, ...f };
@@ -249,6 +267,47 @@ export async function liveTick(ctx, minute) {
     if (matchChanged(old, m)) stmts.push(upsertMatchStmt(db, m));
   }
 
+  if (stmts.length) await db.batch(stmts);
+  await enqueue(db, items);
+}
+
+// ---------- 赛后数据（每 10 分钟） ----------
+// bo3 解析完 demo（通常赛后几小时）才有每名选手的数据。拿到后：存进库（网页赛果详情用），
+// 并把已经发出的结束消息编辑成带记分板的版本；顺便用最新的地图数据补全赛后才填上的比分。
+// 开赛 36 小时后还没有就放弃
+const STATS_GIVEUP = 36 * 3600;
+const STATS_PER_TICK = 3;
+
+export async function statsTick(ctx) {
+  const db = ctx.env.DB;
+  const t = now();
+  const { results } = await db.prepare(
+    "SELECT * FROM matches WHERE status = 'finished' AND stats IS NULL AND start_ts > ? ORDER BY start_ts DESC LIMIT 10",
+  ).bind(t - 2 * 86400).all();
+  if (!results.length) return;
+
+  const olds = results.map(parseMatchRow);
+  const fresh = new Map((await matchesByIds(ctx, olds.map((m) => m.id))).map((m) => [m.id, m]));
+  const stmts = [];
+  const items = [];
+  let fetched = 0;
+  let to = null;
+  for (const old of olds) {
+    const f = fresh.get(old.id);
+    if (f?.parsed === 'done' && fetched < STATS_PER_TICK && ctx.left() > 2) {
+      fetched++;
+      const stats = await matchStats(ctx, old).catch(() => null);
+      if (stats?.length) {
+        const maps = (f.maps || []).filter((g) => g.sc1 != null).length >= (old.maps || []).filter((g) => g.sc1 != null).length ? f.maps : old.maps;
+        const m = { ...old, maps, stats };
+        stmts.push(db.prepare('UPDATE matches SET stats = ?, maps = ? WHERE id = ?').bind(JSON.stringify(stats), JSON.stringify(maps || []), old.id));
+        to ??= await recipients(ctx.env);
+        items.push(...fanout(to, 'end_edit', endMsg(m), m.id));
+        continue;
+      }
+    }
+    if (old.start_ts < t - STATS_GIVEUP) stmts.push(db.prepare("UPDATE matches SET stats = '[]' WHERE id = ?").bind(old.id));
+  }
   if (stmts.length) await db.batch(stmts);
   await enqueue(db, items);
 }

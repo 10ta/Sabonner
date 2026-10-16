@@ -274,7 +274,8 @@
     };
     const tier = String(m.tier || '').toLowerCase();
     const lbl = dayLabel(m.start);
-    return `<a class="res" href="${esc(m.url)}" target="_blank" rel="noopener" title="${esc(m.tournament)}${m.stage ? ' · ' + esc(m.stage) : ''}">
+    // 点击打开详情（地图 + 记分板）；新标签打开 / 中键仍然直达 bo3.gg
+    return `<a class="res" href="${esc(m.url)}" target="_blank" rel="noopener" data-detail="${m.id}" title="${esc(m.tournament)}${m.stage ? ' · ' + esc(m.stage) : ''} · 点击查看详情">
       <span class="res-head"><span class="tier tier-sm tier-${esc(tier)}">${esc(tier.toUpperCase() || '?')}</span>
         <span class="res-tour">${esc(m.tournament || '')}${m.stage ? ` · ${esc(m.stage)}` : ''}</span>
         <span class="res-when">${esc(lbl.rel || lbl.main.split(' ')[0])} ${clock(m.start)}</span></span>
@@ -286,6 +287,63 @@
     if (!list.length) return '<div class="idle">最近 7 天没有已结束的比赛</div>';
     const stars = subTeamIds();
     return `<div class="res-grid${state.resultsOpen ? '' : ' collapsed'}" id="res-grid">${list.map((m) => resultTile(m, stars)).join('')}</div>`;
+  }
+
+  // ---------- 赛果详情 ----------
+  const signed = (n) => (n > 0 ? `+${n}` : String(n));
+  function scoreTable(m, side) {
+    const ps = (m.stats || []).filter((p) => p.side === side).sort((a, b) => b.k - a.k || a.d - b.d);
+    if (!ps.length) return '';
+    const name = side === 1 ? m.team1 : m.team2;
+    const logo = side === 1 ? m.team1_logo : m.team2_logo;
+    const won = m.winner_id ? m.winner_id === (side === 1 ? m.team1_id : m.team2_id) : (side === 1 ? m.s1 > m.s2 : m.s2 > m.s1);
+    const sum = (f) => ps.reduce((x, p) => x + (p[f] || 0), 0);
+    const adrs = ps.filter((p) => p.adr != null);
+    const pm = (n) => `<td class="pm ${n > 0 ? 'pos' : n < 0 ? 'neg' : ''}">${signed(n)}</td>`;
+    return `<section class="sb${won ? ' won' : ''}">
+      <h4>${logo ? `<img src="${esc(logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${esc(name)}${won ? '<i class="sb-win">WIN</i>' : ''}</h4>
+      <table><thead><tr><th>选手</th><th>K</th><th>D</th><th>A</th><th>+/-</th><th>ADR</th></tr></thead><tbody>
+      ${ps.map((p) => {
+        const f = flag(p.cc);
+        return `<tr><td class="pl">${f ? `<span class="flag">${f}</span>` : ''}${esc(p.n)}</td><td>${p.k}</td><td>${p.d}</td><td>${p.a}</td>${pm(p.k - p.d)}<td>${p.adr ?? '–'}</td></tr>`;
+      }).join('')}
+      </tbody><tfoot><tr><td class="pl">合计</td><td>${sum('k')}</td><td>${sum('d')}</td><td>${sum('a')}</td>${pm(sum('k') - sum('d'))}<td>${adrs.length ? Math.round(adrs.reduce((x, p) => x + p.adr, 0) / adrs.length) : '–'}</td></tr></tfoot></table>
+    </section>`;
+  }
+
+  function openDetail(id) {
+    const m = (state.data?.results || []).find((x) => String(x.id) === String(id));
+    if (!m) return false;
+    const tier = String(m.tier || '').toLowerCase();
+    const lbl = dayLabel(m.start);
+    const w1 = m.winner_id ? m.winner_id === m.team1_id : m.s1 > m.s2;
+    const team = (side) => {
+      const f = flag(side === 1 ? m.team1_cc : m.team2_cc);
+      const rank = side === 1 ? m.team1_rank : m.team2_rank;
+      return `<span class="dt-team${(side === 1) === w1 ? ' win' : ''}">${f ? `<span class="flag">${f}</span>` : ''}${esc(side === 1 ? m.team1 : m.team2)}${rank ? `<span class="rank">#${rank}</span>` : ''}</span>`;
+    };
+    const maps = (m.maps || []).filter((g) => g.status === 'finished');
+    const v = aiVerdict(m);
+    $('#detail-title').textContent = `${lbl.rel || lbl.main} ${clock(m.start)} · BO${m.bo}`;
+    $('#detail-body').innerHTML = `
+      <div class="dt-head"><span class="tier tier-${esc(tier)}">${esc(tier.toUpperCase() || '?')}</span>
+        <span class="tour"><span class="tour-name">${esc(m.tournament || '')}</span>${tourSub(m)}</span></div>
+      <div class="dt-score">${team(1)}<b>${m.s1}<i>:</i>${m.s2}</b>${team(2)}</div>
+      ${m.ai && v != null ? `<p class="dt-ai"><i class="ai-tag ${v ? 'ai-ok' : 'ai-miss'}">AI</i> 预测 ${esc(m.ai.winner_id === m.team1_id ? m.team1 : m.team2)} ${m.ai.winner_id === m.team1_id ? `${m.ai.s1}:${m.ai.s2}` : `${m.ai.s2}:${m.ai.s1}`} · ${v ? '猜中' : '没猜中'}</p>` : ''}
+      <h3 class="dt-h">地图</h3>
+      ${maps.length ? `<div class="maps dt-maps">${maps.map((g) => {
+        const win = g.side === 1 ? m.team1 : g.side === 2 ? m.team2 : g.winner || '';
+        return `<div class="map finished"><span class="map-n">${g.n}</span><span class="map-name">${esc(g.map || '待定')}</span><span class="map-score">${g.sc1 != null ? `${g.sc1}:${g.sc2}` : '—'}</span><span class="map-win">${win ? '✓ ' + esc(win) : ''}</span></div>`;
+      }).join('')}</div>` : '<p class="dt-empty">没有逐图数据</p>'}
+      <h3 class="dt-h">记分板</h3>
+      ${m.stats && m.stats.length
+        ? `<div class="sbs">${scoreTable(m, 1)}${scoreTable(m, 2)}</div><p class="dt-note">整场合计；ADR 为整场平均每回合伤害。</p>`
+        : `<p class="dt-empty">${m.stats ? 'bo3 没有这场的选手数据' : '选手数据还在生成中：bo3 赛后几小时内解析完 demo，之后这里和 TG 结束消息会自动补上'}</p>`}
+      <a class="btn dt-link" href="${esc(m.url)}" target="_blank" rel="noopener">在 bo3.gg 查看 ↗</a>`;
+    const dlg = $('#detail');
+    if (!dlg.open) dlg.showModal();
+    $('#detail-body').scrollTop = 0;
+    return true;
   }
 
   // 收起时只留两行（手机上一列时留三行），按当前列数算
@@ -543,6 +601,14 @@
       jumpTo(jumpBtn.dataset.jump);
       return;
     }
+    const det = e.target.closest('[data-detail]');
+    // 普通左键点击打开详情；Ctrl / ⌘ / Shift / 中键照常在新标签打开 bo3.gg
+    if (det && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.button === 0) {
+      if (openDetail(det.dataset.detail)) e.preventDefault();
+      return;
+    }
+    if (e.target.closest('[data-close]')) { $('#detail').close(); return; }
+    if (e.target.id === 'detail') { $('#detail').close(); return; } // 点遮罩关闭
     if (e.target.closest('#res-more')) {
       state.resultsOpen = !state.resultsOpen;
       store.set('sabonner.resultsOpen', state.resultsOpen ? '1' : null);

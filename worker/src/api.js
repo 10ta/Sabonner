@@ -33,6 +33,7 @@ const pubMatch = (m) => ({
   stage: m.stage, tier: m.tier, stars: m.stars, bo: m.bo, start: m.start_ts,
   status: m.status, s1: m.s1, s2: m.s2, winner_id: m.winner_id, maps: m.maps,
   ai: m.ai_winner_id ? { winner_id: m.ai_winner_id, s1: m.ai_s1, s2: m.ai_s2 } : null,
+  stats: m.status === 'finished' && Array.isArray(m.stats) ? m.stats : null, // 赛后记分板；null 表示还没出
 });
 
 const pubSubs = (s) => ({
