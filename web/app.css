@@ -729,7 +729,6 @@ input:focus { box-shadow: 3px 3px 0 var(--accent); }
 .sb td.pl .flag { margin-right: 0.35rem; }
 .sb td.pm.pos { color: var(--accent-green); }
 .sb td.pm.neg { color: var(--accent-red); }
-.sb tfoot td { border-top: 3px solid var(--black); font-weight: 700; }
 
 /* ---------- 窄屏 ---------- */
 @media (max-width: 640px) {

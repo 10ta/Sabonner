@@ -297,8 +297,6 @@
     const name = side === 1 ? m.team1 : m.team2;
     const logo = side === 1 ? m.team1_logo : m.team2_logo;
     const won = m.winner_id ? m.winner_id === (side === 1 ? m.team1_id : m.team2_id) : (side === 1 ? m.s1 > m.s2 : m.s2 > m.s1);
-    const sum = (f) => ps.reduce((x, p) => x + (p[f] || 0), 0);
-    const adrs = ps.filter((p) => p.adr != null);
     const pm = (n) => `<td class="pm ${n > 0 ? 'pos' : n < 0 ? 'neg' : ''}">${signed(n)}</td>`;
     return `<section class="sb${won ? ' won' : ''}">
       <h4>${logo ? `<img src="${esc(logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${esc(name)}${won ? '<i class="sb-win">WIN</i>' : ''}</h4>
@@ -307,7 +305,7 @@
         const f = flag(p.cc);
         return `<tr><td class="pl">${f ? `<span class="flag">${f}</span>` : ''}${esc(p.n)}</td><td>${p.k}</td><td>${p.d}</td><td>${p.a}</td>${pm(p.k - p.d)}<td>${p.adr ?? '–'}</td></tr>`;
       }).join('')}
-      </tbody><tfoot><tr><td class="pl">合计</td><td>${sum('k')}</td><td>${sum('d')}</td><td>${sum('a')}</td>${pm(sum('k') - sum('d'))}<td>${adrs.length ? Math.round(adrs.reduce((x, p) => x + p.adr, 0) / adrs.length) : '–'}</td></tr></tfoot></table>
+      </tbody></table>
     </section>`;
   }
 
@@ -337,8 +335,8 @@
       }).join('')}</div>` : '<p class="dt-empty">没有逐图数据</p>'}
       <h3 class="dt-h">记分板</h3>
       ${m.stats && m.stats.length
-        ? `<div class="sbs">${scoreTable(m, 1)}${scoreTable(m, 2)}</div><p class="dt-note">整场合计；ADR 为整场平均每回合伤害。</p>`
-        : `<p class="dt-empty">${m.stats ? 'bo3 没有这场的选手数据' : '选手数据还在生成中：bo3 赛后几小时内解析完 demo，之后这里和 TG 结束消息会自动补上'}</p>`}
+        ? `<div class="sbs">${scoreTable(m, 1)}${scoreTable(m, 2)}</div><p class="dt-note">整场数据；ADR 为整场平均每回合伤害。</p>`
+        : `<p class="dt-empty">${m.stats ? 'bo3 没有这场的选手数据' : '选手数据还在生成中：bo3 赛后解析完 demo（通常几小时，慢的要一天多）后，这里和 TG 结束消息会自动补上'}</p>`}
       <a class="btn dt-link" href="${esc(m.url)}" target="_blank" rel="noopener">在 bo3.gg 查看 ↗</a>`;
     const dlg = $('#detail');
     if (!dlg.open) dlg.showModal();

@@ -136,7 +136,7 @@ export function mapEndMsg(m, g, maps = [g]) {
 }
 
 // ---------- 记分板（赛后数据） ----------
-// 等宽表格，手机上一行约 32 个字符：选手 K D A +/- ADR，最后一行合计（ADR 取平均）
+// 等宽表格，手机上一行约 32 个字符：选手 K D A +/- ADR
 const padR = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s + ' '.repeat(n - s.length));
 const padL = (s, n) => ' '.repeat(Math.max(0, n - String(s).length)) + s;
 const signed = (n) => (n > 0 ? `+${n}` : String(n));
@@ -149,12 +149,9 @@ function scoreboard(m) {
   return [1, 2].map((side) => {
     const ps = statsRows(m.stats, side);
     if (!ps.length) return '';
-    const sum = (f) => ps.reduce((x, p) => x + (p[f] || 0), 0);
-    const adrs = ps.filter((p) => p.adr != null);
     const lines = [
       row('', 'K', 'D', 'A', '+/-', 'ADR'),
       ...ps.map((p) => row(p.n, p.k, p.d, p.a, signed(p.k - p.d), p.adr ?? '-')),
-      row('Total', sum('k'), sum('d'), sum('a'), signed(sum('k') - sum('d')), adrs.length ? Math.round(adrs.reduce((x, p) => x + p.adr, 0) / adrs.length) : '-'),
     ];
     const f = flag(side === 1 ? m.team1_cc : m.team2_cc);
     return `📊 ${f ? f + ' ' : ''}<b>${esc(side === 1 ? m.team1 : m.team2)}</b>\n<pre>${esc(lines.join('\n'))}</pre>`;

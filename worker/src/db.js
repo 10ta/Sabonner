@@ -122,7 +122,8 @@ export async function cleanup(db) {
     db.prepare(`DELETE FROM matches WHERE id IN (SELECT id FROM matches ORDER BY start_ts DESC LIMIT -1 OFFSET ${MAX_MATCHES})`),
     db.prepare('DELETE FROM tournaments WHERE updated_at < ?').bind(t - 30 * 86400),
     db.prepare('DELETE FROM sent WHERE at < ?').bind(t - 30 * 86400),
-    db.prepare('DELETE FROM tg_msgs WHERE sent_at < ?').bind(t - 48 * 3600), // 超过 48 小时 Telegram 不让删了
+    // 超过 48 小时 Telegram 不让删了；结束消息要等赛后数据回来编辑（编辑没有时限），多留几天
+    db.prepare("DELETE FROM tg_msgs WHERE sent_at < ? AND (tag != 'end' OR sent_at < ?)").bind(t - 48 * 3600, t - 5 * 86400),
     db.prepare(`DELETE FROM live_msgs WHERE match_id NOT IN (SELECT id FROM matches)
       OR match_id IN (SELECT id FROM matches WHERE status != 'current' AND updated_at < ?)`).bind(t - 3600),
     db.prepare('DELETE FROM outbox WHERE tries >= 5 OR created_at < ?').bind(t - 6 * 3600),

@@ -274,8 +274,8 @@ export async function liveTick(ctx, minute) {
 // ---------- 赛后数据（每 10 分钟） ----------
 // bo3 解析完 demo（通常赛后几小时）才有每名选手的数据。拿到后：存进库（网页赛果详情用），
 // 并把已经发出的结束消息编辑成带记分板的版本；顺便用最新的地图数据补全赛后才填上的比分。
-// 开赛 36 小时后还没有就放弃
-const STATS_GIVEUP = 36 * 3600;
+// bo3 解析有时要一天多（实测 Legacy vs FURIA 超过 5 小时还在排队），开赛 3 天后还没有才放弃
+const STATS_GIVEUP = 3 * 86400;
 const STATS_PER_TICK = 3;
 
 export async function statsTick(ctx) {
@@ -283,7 +283,7 @@ export async function statsTick(ctx) {
   const t = now();
   const { results } = await db.prepare(
     "SELECT * FROM matches WHERE status = 'finished' AND stats IS NULL AND start_ts > ? ORDER BY start_ts DESC LIMIT 10",
-  ).bind(t - 2 * 86400).all();
+  ).bind(t - STATS_GIVEUP - 86400).all();
   if (!results.length) return;
 
   const olds = results.map(parseMatchRow);
