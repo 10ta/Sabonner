@@ -45,6 +45,7 @@
       <button class="jump" type="button" data-jump="sec-results">赛果 <span class="jump-count" id="jc-results"></span></button>
       <button class="jump" type="button" data-jump="sec-live">直播 <span class="jump-count" id="jc-live"></span></button>
       <button class="jump" type="button" data-jump="sec-upcoming">赛程 <span class="jump-count" id="jc-upcoming"></span></button>
+      <button class="jump" type="button" data-jump="sec-events" id="jump-events" hidden>赛事 <span class="jump-count" id="jc-events"></span></button>
       <button class="jump" type="button" data-jump="sec-admin" id="jump-admin" hidden>管理</button>
     </div>
   </nav>
@@ -66,6 +67,12 @@
     <section class="section" id="sec-upcoming" tabindex="-1" aria-labelledby="h-upcoming">
       <div class="sec-head"><h2 id="h-upcoming">赛程</h2><span class="sec-count" id="sc-upcoming"></span></div>
       <div id="upcoming-body"></div>
+    </section>
+
+    <!-- 当前和即将开始的赛事（只列和订阅范围有交集的，没有就整块隐藏） -->
+    <section class="section" id="sec-events" tabindex="-1" aria-labelledby="h-events" hidden>
+      <div class="sec-head"><h2 id="h-events">赛事</h2><span class="sec-count" id="sc-events"></span><span class="sec-note"><span>进行中 · 60 天内开始</span></span></div>
+      <div id="events-body"></div>
     </section>
 
     <section class="section" id="sec-admin" tabindex="-1" aria-labelledby="h-admin" hidden>

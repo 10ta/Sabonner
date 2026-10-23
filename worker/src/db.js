@@ -25,6 +25,30 @@ export async function recipients(env) {
   return [...ids];
 }
 
+// ---------- 赛事列表 ----------
+// 缓存在 kv 'events'（每 6 小时刷新一次）；按订阅取交集在读的时候做，改订阅后立即生效
+export const EVENTS_WINDOW = 60 * 86400; // 只列进行中和 60 天内开始的
+
+export const eventsStmts = (db) => [
+  db.prepare("SELECT v FROM kv WHERE k = 'events'"),
+  db.prepare("SELECT DISTINCT tournament_slug s FROM matches WHERE status IN ('upcoming', 'current') AND tournament_slug IS NOT NULL"),
+];
+
+// 和订阅范围有交集：tier 命中、有订阅的队伍参赛，或者正在跟踪它的比赛（星级订阅带进来的也算）
+export function pickEvents([cache, tracked], subs, t = now()) {
+  let list = [];
+  try { list = JSON.parse(cache.results[0]?.v || '{}').list || []; } catch { /* 坏缓存当空 */ }
+  const slugs = new Set(tracked.results.map((r) => r.s));
+  const tiers = new Set(subs.tiers);
+  const teams = new Map(subs.teams.map((x) => [x.team_id, x]));
+  return list
+    .filter((e) => (e.end ?? e.start) >= t - 3600 && (e.status === 'current' || e.start <= t + EVENTS_WINDOW))
+    .map((e) => ({ ...e, subTeams: e.teams.filter((id) => teams.has(id)).map((id) => ({ id, name: teams.get(id).name, cc: teams.get(id).cc })) }))
+    .filter((e) => tiers.has(e.tier) || e.subTeams.length || slugs.has(e.slug))
+    .map(({ teams: _, ...e }) => e)
+    .sort((a, b) => (b.status === 'current') - (a.status === 'current') || a.start - b.start); // 进行中的在前，其余按开始时间
+}
+
 // 订阅：3 条查询，可以拼进别的 batch 一起发（见 api.js 的 overview）
 export const subsStmts = (db) => [
   db.prepare('SELECT tier FROM sub_tiers ORDER BY tier'),

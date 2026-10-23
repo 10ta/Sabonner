@@ -250,6 +250,26 @@ export async function matchStats(ctx, m) {
   }).filter((p) => p.side);
 }
 
+// ---------- 赛事列表（当前 + 即将开始） ----------
+// 一次请求拿全部（约 50 个），带参赛队伍；bo3 不支持按队伍过滤，交集在我们这边算
+export async function eventList(ctx) {
+  const url = buildUrl('tournaments', [['tournaments.status', 'in', 'current,upcoming']],
+    { sort: 'start_date', 'page[limit]': 100, with: 'teams' });
+  return (await get(ctx, url)).map((x) => ({
+    id: x.id,
+    slug: x.slug,
+    name: x.name,
+    tier: x.tier || '',
+    status: x.status,
+    start: ts(x.start_date),
+    end: ts(x.end_date),
+    prize: x.prize || null,
+    event_type: x.event_type || null,
+    image: x.image_url || null,
+    teams: Array.isArray(x.teams) ? x.teams.map((t) => t.id).filter(Boolean) : [],
+  }));
+}
+
 const teamOut = (t, countries) => ({ id: t.id, name: t.name, slug: t.slug, cc: countries[t.country_id] || null, logo: t.image_url || null });
 
 export async function searchTeams(ctx, q, limit = 8) {

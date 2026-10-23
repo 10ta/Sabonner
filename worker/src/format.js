@@ -6,7 +6,7 @@
 //   对阵     放在引用块里（左侧色条），比分、时间用等宽字体
 //   ⭐ 订阅的队伍   🤖2:1 AI 预测的胜者和比分（结束后带 ✅ / ❌）   🏆 胜者
 
-import { esc, fmtTime, fmtDate, fmtClock, fmtDur, now } from './util.js';
+import { esc, fmtTime, fmtDate, fmtClock, fmtDur, now, fmtMD } from './util.js';
 import { matchUrl, stagesUrl, flag } from './bo3.js';
 import { roomUrl } from './douyu.js';
 
@@ -239,7 +239,25 @@ const dayHead = (icon, title, ts, tz) => `${icon} <b>${title}</b> · <i>${fmtDat
 
 // 每日预报：今日 + 明日赛程（取代了提前 1 天的单条预告）
 //   today / tomorrow 按开赛时间排序；两天都没有比赛时用 next（之后最近的一场）
-export function dailyMsg(dayStart, today, tomorrow, next, stars, tz) {
+// 赛事：进行中 + 即将开始（和订阅有交集的），每个一两行，放在每日预报末尾
+const EVENTS_MAX = 10;
+export function eventsBlock(events, tz) {
+  if (!events?.length) return '';
+  const range = (e) => {
+    const a = fmtMD(e.start, tz);
+    const b = e.end ? fmtMD(e.end, tz) : '';
+    return b && b !== a ? `${a}–${b}` : a;
+  };
+  const lines = events.slice(0, EVENTS_MAX).map((e) => {
+    const meta = [mono(range(e)), e.prize ? `💰 ${fmtPrize(e.prize)}` : '', EVENT[e.event_type] || '',
+      e.subTeams?.length ? `⭐ ${e.subTeams.map((x) => esc(x.name)).join('、')}` : ''].filter(Boolean).join(' · ');
+    return `${TIER_ICON[String(e.tier).toLowerCase()] || '⬜'} <b>${esc(e.name)}</b>${e.status === 'current' ? ' 🔴 <i>进行中</i>' : ''}\n${meta}`;
+  });
+  const more = events.length > EVENTS_MAX ? `\n<i>……还有 ${events.length - EVENTS_MAX} 个，去网页查看</i>` : '';
+  return `🏟 <b>赛事</b>\n${quote(lines.join('\n\n'))}${more}`;
+}
+
+export function dailyMsg(dayStart, today, tomorrow, next, stars, tz, events = []) {
   const parts = [];
   const section = (icon, title, ts, list, emptyText) => {
     parts.push({ text: dayHead(icon, title, ts, tz) });
@@ -256,9 +274,13 @@ export function dailyMsg(dayStart, today, tomorrow, next, stars, tz) {
           tourTitle(next), quote(matchEntry(next, tz, stars, null))].join('\n')
         : '<i>暂时也没有已安排的比赛</i>',
     });
-    return parts.map((p) => p.text).join('\n\n');
+    const ev = eventsBlock(events, tz);
+    return [...parts.map((p) => p.text), ...(ev ? [ev] : [])].join('\n\n');
   }
   const out = compose(parts, '发送 /next 查看');
+  // 赛事块放在末尾；比赛很多、放不下时就不带
+  const ev = eventsBlock(events, tz);
+  if (ev && visibleLen(out.join('\n\n')) + visibleLen(ev) < LIMIT) out.push(ev);
   out.push(`<i>📊 今天 ${today.length} 场 · 明天 ${tomorrow.length} 场 · 开赛前 30 分钟再提醒\n⭐ 订阅的队伍 · 🤖 AI 预测胜者和比分</i>`);
   return out.join('\n\n');
 }

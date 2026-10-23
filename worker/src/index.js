@@ -35,6 +35,21 @@ export default {
 
     if (path.startsWith('/api/')) return handleApi(req, env, path, makeCtx(env));
 
+    // 队徽 / 赛事图片中转：只给网页分析配色用（判断浅色 / 深色背景下看不看得清），
+    // 只放行 bo3 的图片域名，浏览器缓存 30 天
+    if (path === '/img' && req.method === 'GET') {
+      const u = url.searchParams.get('u') || '';
+      let target;
+      try { target = new URL(u); } catch { return new Response('bad url', { status: 400 }); }
+      if (target.protocol !== 'https:' || target.hostname !== 'files.bo3.gg') return new Response('forbidden', { status: 403 });
+      const r = await fetch(target.toString(), { headers: { Accept: 'image/*' }, cf: { cacheTtl: 30 * 86400, cacheEverything: true } });
+      const type = r.headers.get('content-type') || '';
+      if (!r.ok || !type.startsWith('image/')) return new Response('not found', { status: 404, headers: CORS });
+      return new Response(r.body, {
+        headers: { 'content-type': type, 'cache-control': 'public, max-age=2592000, immutable', 'access-control-allow-origin': '*' },
+      });
+    }
+
     if (path === '/') return new Response('Sabonner is running.', { headers: { 'content-type': 'text/plain; charset=utf-8' } });
     return new Response('not found', { status: 404 });
   },

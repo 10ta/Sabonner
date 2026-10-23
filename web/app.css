@@ -215,13 +215,11 @@ a.tour-stage:hover { color: var(--text); text-decoration: underline; text-decora
 .team { display: grid; grid-template-columns: 34px 1fr auto; align-items: center; gap: 0.7rem; }
 .team-logo {
   width: 34px; height: 34px;
-  border: 2px solid var(--line);
-  background: var(--white);
   display: flex; align-items: center; justify-content: center;
   overflow: hidden;
   font-family: 'Archivo Black', sans-serif; font-size: 0.7rem;
 }
-.team-logo img { width: 100%; height: 100%; object-fit: contain; padding: 2px; }
+.team-logo img { width: 100%; height: 100%; object-fit: contain; }
 .team-name {
   font-family: 'Twemoji Country Flags', 'Archivo Black', sans-serif;
   font-size: 1.05rem; text-transform: uppercase;
@@ -527,10 +525,9 @@ input:focus { box-shadow: 3px 3px 0 var(--accent); }
 .res-logo {
   width: 22px; height: 22px;
   display: flex; align-items: center; justify-content: center; overflow: hidden;
-  border: 1.5px solid var(--line); background: var(--white);
   font: 400 0.5rem 'Archivo Black', sans-serif;
 }
-.res-logo img { width: 100%; height: 100%; object-fit: contain; padding: 1px; }
+.res-logo img { width: 100%; height: 100%; object-fit: contain; }
 .res-name {
   display: flex; align-items: center; min-width: 0;
   font-family: 'Twemoji Country Flags', 'Archivo Black', sans-serif; font-size: 0.85rem; text-transform: uppercase;
@@ -649,7 +646,6 @@ input:focus { box-shadow: 3px 3px 0 var(--accent); }
 
 .team-logo { position: relative; overflow: visible; }
 .team-logo img { overflow: hidden; }
-.team.ai .team-logo { border: 3px solid var(--accent); box-shadow: 2px 2px 0 var(--black); }
 .ai-tag {
   display: inline-flex; align-items: center; justify-content: center;
   height: 14px; padding: 0 3px;
@@ -719,7 +715,7 @@ input:focus { box-shadow: 3px 3px 0 var(--accent); }
   font: 400 0.85rem 'Archivo Black', sans-serif; text-transform: uppercase;
 }
 .sb.won h4 { background: var(--accent); color: var(--on-accent); }
-.sb h4 img { width: 20px; height: 20px; object-fit: contain; background: var(--white); border: 1.5px solid var(--black); }
+.sb h4 img { width: 20px; height: 20px; object-fit: contain; }
 .sb-win { margin-left: auto; font: 700 0.6rem 'Space Grotesk', sans-serif; font-style: normal; letter-spacing: 0.12em; padding: 1px 4px; border: 1.5px solid currentColor; }
 .sb table { width: 100%; border-collapse: collapse; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
 .sb th { font: 700 0.62rem 'Space Grotesk', sans-serif; letter-spacing: 0.08em; color: var(--text-muted); padding: 0.35rem 0.4rem; text-align: right; }
@@ -729,6 +725,38 @@ input:focus { box-shadow: 3px 3px 0 var(--accent); }
 .sb td.pl .flag { margin-right: 0.35rem; }
 .sb td.pm.pos { color: var(--accent-green); }
 .sb td.pm.neg { color: var(--accent-red); }
+
+/* ---------- 队徽：不带框；看不清的画成单色（浅色主题全黑、深色主题全白，由 app.js 判断） ---------- */
+.no-img { border: 2px solid var(--line); } /* 没有队徽时的首字母占位还是给个框 */
+img.logo-mono { filter: var(--logo-mono, brightness(0)); }
+
+/* ---------- 赛事 ---------- */
+.ev-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 0.9rem; }
+.ev {
+  display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 0.75rem;
+  padding: 0.6rem 0.8rem;
+  background: var(--card-bg); color: inherit; text-decoration: none;
+  border: 3px solid var(--black); box-shadow: 4px 4px 0 var(--shadow);
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+  min-width: 0;
+}
+.ev:hover { transform: translate(-2px, -2px); box-shadow: 6px 6px 0 var(--shadow); }
+.ev.live { border-left-width: 8px; border-left-color: var(--accent-red); }
+.ev-logo { width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; }
+.ev-logo img { width: 100%; height: 100%; object-fit: contain; }
+.ev-main { min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+.ev-name {
+  display: flex; align-items: center; gap: 0.45rem; min-width: 0;
+  font-weight: 700; font-size: 0.9rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ev-name .tier { flex-shrink: 0; }
+.ev-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.5rem; font-size: 0.72rem; color: var(--text-muted); }
+.ev-subs { font-family: 'Twemoji Country Flags', inherit; font-weight: 700; color: var(--text); }
+.ev-date { display: flex; flex-direction: column; align-items: flex-end; gap: 0.1rem; white-space: nowrap; }
+.ev-date b { font: 400 0.85rem 'Archivo Black', sans-serif; }
+.ev-date span { font-size: 0.7rem; color: var(--text-muted); font-weight: 700; }
+.ev-date .ev-live { color: var(--accent-red); }
 
 /* ---------- 窄屏 ---------- */
 @media (max-width: 640px) {
@@ -757,4 +785,5 @@ input:focus { box-shadow: 3px 3px 0 var(--accent); }
   .dt-team { font-size: 0.85rem; }
   .dt-score b { font-size: 1.15rem; padding: 0.05rem 0.4rem; }
   .sbs { grid-template-columns: 1fr; }
+  .ev-list { grid-template-columns: 1fr; gap: 0.7rem; }
 }

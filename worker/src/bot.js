@@ -12,7 +12,7 @@ import { getSubs, getStreamers, listMatches } from './db.js';
 import { searchTeams, teamById, flag } from './bo3.js';
 import { roomInfo, roomUrl } from './douyu.js';
 import { matchList } from './format.js';
-import { refreshSchedule, buildDaily } from './engine.js';
+import { refreshSchedule, buildDaily, eventsTick } from './engine.js';
 import { tg, sendMessage, editMessage, answerCallback, kb } from './tgapi.js';
 
 const TIERS = ['s', 'a', 'b', 'c'];
@@ -135,8 +135,8 @@ export async function handleUpdate(ctx, update) {
     case 'users':
       return reply(...await usersView(env.DB));
     case 'refresh': {
-      const r = await refreshSchedule(ctx);
-      return reply(`已刷新，正在跟踪 ${r.tracked} 场比赛。`);
+      const [r, ev] = await Promise.all([refreshSchedule(ctx), eventsTick(ctx, true).catch(() => null)]);
+      return reply(`已刷新，正在跟踪 ${r.tracked} 场比赛${ev != null ? `，赛事列表 ${ev} 个` : ''}。`);
     }
     case 'status':
       return reply(await statusText(env));

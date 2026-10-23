@@ -11,8 +11,8 @@
 // 所有事件都先 claim 去重键，再入队，保证同一事件只推一次。
 
 import { now } from './util.js';
-import { getSubs, getKV, setKVStmt, recipients, upsertMatchStmt, matchChanged, parseMatchRow, cleanup, KEEP_OLD } from './db.js';
-import { matchesByTiers, matchesByTeams, matchesByStars, matchesByIds, attachTournaments, matchStats } from './bo3.js';
+import { getSubs, getKV, setKVStmt, recipients, upsertMatchStmt, matchChanged, parseMatchRow, cleanup, KEEP_OLD, eventsStmts, pickEvents, subsStmts, subsFrom } from './db.js';
+import { matchesByTiers, matchesByTeams, matchesByStars, matchesByIds, attachTournaments, matchStats, eventList } from './bo3.js';
 import { roomInfo } from './douyu.js';
 import { preMsg, liveCard, mapEndMsg, endMsg, streamerLiveMsg, dailyMsg } from './format.js';
 import { enqueue, fanout, flush } from './outbox.js';
@@ -52,6 +52,7 @@ export async function runCron(ctx) {
   await step('remind', () => remindTick(ctx));
   await step('daily', () => dailyTick(ctx));
   if (minute % 60 === 7) await step('cleanup', () => cleanup(db));
+  if (minute % 10 === 7) await step('events', () => eventsTick(ctx));
   await step('flush', () => flush(ctx, OUTBOX_RESERVE));
   await step('expire', () => expireTick(ctx));
 }
@@ -139,16 +140,19 @@ export async function remindTick(ctx) {
 export async function buildDaily(ctx, dayStart) {
   const db = ctx.env.DB;
   const end = dayStart + 86400;
-  const [today, tomorrow, next, subs] = await db.batch([
+  const [today, tomorrow, next, subs, ...rest] = await db.batch([
     db.prepare(`SELECT * FROM matches WHERE status = 'current'
       OR (status IN ('upcoming', 'finished') AND start_ts >= ? AND start_ts < ?) ORDER BY start_ts`).bind(dayStart, end),
     db.prepare("SELECT * FROM matches WHERE status = 'upcoming' AND start_ts >= ? AND start_ts < ? ORDER BY start_ts").bind(end, end + 86400),
     db.prepare("SELECT * FROM matches WHERE status = 'upcoming' AND start_ts >= ? ORDER BY start_ts LIMIT 1").bind(end + 86400),
     db.prepare('SELECT team_id FROM sub_teams'),
+    ...eventsStmts(db),
+    ...subsStmts(db),
   ]);
   const stars = new Set(subs.results.map((r) => r.team_id));
+  const events = pickEvents(rest.slice(0, 2), subsFrom(rest.slice(2)));
   return dailyMsg(dayStart, today.results.map(parseMatchRow), tomorrow.results.map(parseMatchRow),
-    next.results[0] || null, stars, ctx.tz);
+    next.results[0] || null, stars, ctx.tz, events);
 }
 
 export async function dailyTick(ctx) {
@@ -312,6 +316,23 @@ export async function statsTick(ctx) {
   }
   if (stmts.length) await db.batch(stmts);
   await enqueue(db, items);
+}
+
+// ---------- 赛事列表（每 6 小时） ----------
+// 每 10 分钟看一眼缓存时间，过期才请求 bo3（一天 4 次）
+const EVENTS_TTL = 6 * 3600;
+export async function eventsTick(ctx, force = false) {
+  const db = ctx.env.DB;
+  const t = now();
+  if (!force) {
+    const row = await db.prepare("SELECT v FROM kv WHERE k = 'events'").first();
+    let at = 0;
+    try { at = JSON.parse(row?.v || '{}').at || 0; } catch { /* 当没有 */ }
+    if (t - at < EVENTS_TTL) return;
+  }
+  const list = await eventList(ctx);
+  await setKVStmt(db, 'events', JSON.stringify({ at: t, list })).run();
+  return list.length;
 }
 
 // ---------- 短时消息到期删除（每分钟） ----------

@@ -15,10 +15,10 @@
 //     POST   refresh                  立即刷新赛程
 
 import { json, now, safeEqual } from './util.js';
-import { getSubs, listMatches, matchesStmt, subsStmts, subsFrom, parseMatchRow } from './db.js';
+import { getSubs, listMatches, matchesStmt, subsStmts, subsFrom, parseMatchRow, eventsStmts, pickEvents } from './db.js';
 import { matchUrl, stagesUrl, searchTeams, teamById } from './bo3.js';
 import { roomInfo } from './douyu.js';
-import { refreshSchedule } from './engine.js';
+import { refreshSchedule, eventsTick } from './engine.js';
 import { addTeam, addRoom } from './bot.js';
 import { sendMessage } from './tgapi.js';
 
@@ -61,11 +61,13 @@ export async function handleApi(req, env, path, ctx) {
       db.prepare('SELECT * FROM streamers ORDER BY live DESC, room_id'),
       db.prepare("SELECT v FROM kv WHERE k = 'last_refresh'"),
       ...subsStmts(db),
+      ...eventsStmts(db),
     ]);
     const [upcoming, live, results] = res.slice(0, 3).map((r) => r.results.map(parseMatchRow));
     const rooms = res[3].results;
     const last = res[4].results[0]?.v;
-    const subs = subsFrom(res.slice(5));
+    const subs = subsFrom(res.slice(5, 8));
+    const events = pickEvents(res.slice(8, 10), subs);
     return json({
       now: now(),
       tz: env.TZ || 'Asia/Shanghai',
@@ -74,6 +76,7 @@ export async function handleApi(req, env, path, ctx) {
       live: live.map(pubMatch),
       results: results.map(pubMatch),
       subs: pubSubs(subs),
+      events: events.map((e) => ({ ...e, url: `https://bo3.gg/tournaments/${e.slug}` })),
       rooms: rooms.map((r) => ({
         room_id: r.room_id, owner: r.owner, title: r.title, category: r.category, avatar: r.avatar,
         live: !!r.live, changed_at: r.changed_at, show_time: r.show_time,
@@ -170,7 +173,10 @@ async function handleAdmin(req, env, sub, ctx) {
     }
   }
 
-  if (parts[0] === 'refresh' && method === 'POST') return json({ ok: true, refresh: await refresh() });
+  if (parts[0] === 'refresh' && method === 'POST') {
+    const events = await eventsTick(ctx, true).catch(() => null);
+    return json({ ok: true, refresh: await refresh(), events });
+  }
 
   return json({ error: 'not found' }, 404);
 }

@@ -31,6 +31,12 @@ export function fmtDate(ts, tz = 'Asia/Shanghai') {
   return `${p.month}/${p.day} ${p.weekday}`;
 }
 
+// "10/24"
+export function fmtMD(ts, tz = 'Asia/Shanghai') {
+  const p = parts(ts, tz);
+  return `${p.month}/${p.day}`;
+}
+
 // "19:30"
 export function fmtClock(ts, tz = 'Asia/Shanghai') {
   const p = parts(ts, tz);

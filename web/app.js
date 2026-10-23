@@ -136,7 +136,7 @@
     }
     const f = flag(cc);
     return `<div class="${cls}">
-      <span class="team-logo">${logo ? `<img src="${esc(logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}${aiPick ? aiTag(m, side) : ''}</span>
+      <span class="team-logo${logo ? '' : ' no-img'}">${logo ? `<img src="${esc(logo)}" alt="" data-logo loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}${aiPick ? aiTag(m, side) : ''}</span>
       <span class="team-name" title="${esc(name)}${rank ? ` · 世界排名 #${rank}` : ''}">${f ? `<span class="flag">${f}</span>` : ''}${esc(name)}${rank ? `<span class="rank">#${rank}</span>` : ''}</span>
       ${showScore ? `<span class="team-score">${score ?? 0}</span>` : ''}
     </div>`;
@@ -268,7 +268,7 @@
       const ai = m.ai && m.ai.winner_id === id && v != null
         ? `<i class="ai-tag ${v ? 'ai-ok' : 'ai-miss'}" title="AI 预测 ${esc(name)} 胜 · ${v ? '猜中' : '没猜中'}">AI${v ? '✓' : '✗'}</i>` : '';
       return `<span class="res-team${won ? ' win' : ' lose'}${stars.has(id) ? ' star' : ''}">
-        <span class="res-logo">${logo ? `<img src="${esc(logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}</span>
+        <span class="res-logo${logo ? '' : ' no-img'}">${logo ? `<img src="${esc(logo)}" alt="" data-logo loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}</span>
         <span class="res-name">${f ? `<span class="flag">${f}</span>` : ''}<span class="nm">${esc(name)}</span>${rank ? `<span class="rank">#${rank}</span>` : ''}${ai}</span>
         <b class="res-s">${side === 1 ? m.s1 : m.s2}</b></span>`;
     };
@@ -289,6 +289,128 @@
     return `<div class="res-grid${state.resultsOpen ? '' : ' collapsed'}" id="res-grid">${list.map((m) => resultTile(m, stars)).join('')}</div>`;
   }
 
+  // ---------- 赛事 ----------
+  const md = (ts) => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()}`; };
+  function eventList(events) {
+    const t = nowSec();
+    return `<div class="ev-list">${events.map((e) => {
+      const tier = String(e.tier || '').toLowerCase();
+      const range = e.end && md(e.end) !== md(e.start) ? `${md(e.start)}–${md(e.end)}` : md(e.start);
+      const live = e.status === 'current';
+      const when = live ? '进行中' : e.start - t < 86400 ? `${dur(e.start - t)}后` : `${Math.ceil((e.start - t) / 86400)} 天后`;
+      const meta = [
+        e.prize ? `<span class="tm-prize">${fmtPrize(e.prize)}</span>` : '',
+        e.event_type === 'lan' ? '<span class="tm-tag tm-lan">LAN</span>' : e.event_type === 'online' ? '<span class="tm-tag tm-online">ONLINE</span>' : '',
+        e.subTeams?.length ? `<span class="ev-subs" title="参赛的订阅队伍">★ ${e.subTeams.map((x) => `${flag(x.cc)}${esc(x.name)}`).join('、')}</span>` : '',
+      ].filter(Boolean).join('');
+      return `<a class="ev${live ? ' live' : ''}" href="${esc(e.url)}" target="_blank" rel="noopener" title="${esc(e.name)} · bo3.gg">
+        <span class="ev-logo">${e.image ? `<img src="${esc(e.image)}" alt="" data-logo loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
+        <span class="ev-main"><span class="ev-name"><span class="tier tier-sm tier-${esc(tier)}">${esc(tier.toUpperCase() || '?')}</span>${esc(e.name)}</span>
+          ${meta ? `<span class="ev-meta">${meta}</span>` : ''}</span>
+        <span class="ev-date"><b>${range}</b><span class="${live ? 'ev-live' : ''}">${when}</span></span>
+      </a>`;
+    }).join('')}</div>`;
+  }
+
+  // ---------- 队徽可读性 ----------
+  // 透明底的队徽放在卡片底色上可能看不清（浅色主题里的黄色 / 浅绿队徽，深色主题里的黑色队徽）。
+  // 和 Liquipedia 一样：算队徽像素和背景的对比度，大部分都看不清时，浅色主题画成全黑、深色主题画成全白。
+  // 读像素需要图片允许跨域：先直接读，不行就经 Worker 的 /img 中转（只放行 bo3 的图片域名）。
+  // 结果按「背景色 + 图片地址」存在本机，每个队徽在每套配色下只算一次。
+  const LOGO_KEY = 'sabonner.logo.v1';
+  let logoMemo = {};
+  try { logoMemo = JSON.parse(store.get(LOGO_KEY) || '{}'); } catch { logoMemo = {}; }
+  const logoJobs = new Map();
+  let logoSaveTimer;
+  const saveLogos = () => {
+    clearTimeout(logoSaveTimer);
+    logoSaveTimer = setTimeout(() => {
+      const keys = Object.keys(logoMemo);
+      if (keys.length > 600) for (const k of keys.slice(0, keys.length - 600)) delete logoMemo[k];
+      store.set(LOGO_KEY, JSON.stringify(logoMemo));
+    }, 500);
+  };
+  const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+  const lum = (r, g, b) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+  const probe = document.createElement('canvas');
+  function cssRgb(color) {
+    const c = probe.getContext('2d', { willReadFrequently: true });
+    c.clearRect(0, 0, 1, 1); c.fillStyle = '#000'; c.fillStyle = color; c.fillRect(0, 0, 1, 1);
+    return [...c.getImageData(0, 0, 1, 1).data.slice(0, 3)];
+  }
+  function cardBg() {
+    const v = getComputedStyle(document.documentElement).getPropertyValue('--card-bg').trim() || '#fff';
+    return cssRgb(v);
+  }
+  function loadCors(src) {
+    return new Promise((ok, fail) => {
+      const im = new Image();
+      im.crossOrigin = 'anonymous';
+      im.referrerPolicy = 'no-referrer';
+      im.onload = () => ok(im);
+      im.onerror = fail;
+      im.src = src;
+    });
+  }
+  // 返回 true 表示要改成单色
+  function judge(im, bg) {
+    const N = 40;
+    const cv = document.createElement('canvas');
+    cv.width = N; cv.height = N;
+    const c = cv.getContext('2d', { willReadFrequently: true });
+    const s = Math.min(N / im.naturalWidth, N / im.naturalHeight) || 1;
+    const w = im.naturalWidth * s, h = im.naturalHeight * s;
+    c.drawImage(im, (N - w) / 2, (N - h) / 2, w, h);
+    const d = c.getImageData(0, 0, N, N).data; // 跨域读不了会在这里抛错
+    const bgL = lum(...bg);
+    let cover = 0, good = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      const a = d[i + 3] / 255;
+      if (a < 0.1) continue;
+      // 半透明像素按实际显示的颜色（和背景混合后）算
+      const L = lum(d[i] * a + bg[0] * (1 - a), d[i + 1] * a + bg[1] * (1 - a), d[i + 2] * a + bg[2] * (1 - a));
+      const ratio = (Math.max(L, bgL) + 0.05) / (Math.min(L, bgL) + 0.05);
+      cover += a;
+      if (ratio >= 1.8) good += a;
+    }
+    if (!cover) return false;
+    if (cover / (N * N) > 0.85) return false; // 自带底色的方形队徽，本来就看得清
+    return good / cover < 0.35; // 看得清的部分不到 35%
+  }
+  async function verdict(src, bg) {
+    const key = `${bg.join(',')}|${src}`;
+    if (key in logoMemo) return logoMemo[key];
+    if (!logoJobs.has(key)) {
+      logoJobs.set(key, (async () => {
+        let mono = false;
+        try {
+          try { mono = judge(await loadCors(src), bg); } catch {
+            if (!API) throw new Error('no api');
+            mono = judge(await loadCors(`${API}/img?u=${encodeURIComponent(src)}`), bg);
+          }
+          logoMemo[key] = mono;
+          saveLogos();
+        } catch { /* 读不到像素就保持原样 */ }
+        return mono;
+      })());
+    }
+    return logoJobs.get(key);
+  }
+  function fixLogos(root = document) {
+    const bg = cardBg();
+    const dark = lum(...bg) < 0.4;
+    document.documentElement.style.setProperty('--logo-mono', dark ? 'brightness(0) invert(1)' : 'brightness(0)');
+    for (const img of root.querySelectorAll('img[data-logo]')) {
+      const src = img.getAttribute('src');
+      if (!src) continue;
+      const key = `${bg.join(',')}|${src}`;
+      if (img.dataset.logoKey === key) continue;
+      img.dataset.logoKey = key;
+      if (key in logoMemo) { img.classList.toggle('logo-mono', !!logoMemo[key]); continue; }
+      verdict(src, bg).then((mono) => { if (img.dataset.logoKey === key) img.classList.toggle('logo-mono', mono); });
+    }
+  }
+
   // ---------- 赛果详情 ----------
   const signed = (n) => (n > 0 ? `+${n}` : String(n));
   function scoreTable(m, side) {
@@ -299,7 +421,7 @@
     const won = m.winner_id ? m.winner_id === (side === 1 ? m.team1_id : m.team2_id) : (side === 1 ? m.s1 > m.s2 : m.s2 > m.s1);
     const pm = (n) => `<td class="pm ${n > 0 ? 'pos' : n < 0 ? 'neg' : ''}">${signed(n)}</td>`;
     return `<section class="sb${won ? ' won' : ''}">
-      <h4>${logo ? `<img src="${esc(logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${esc(name)}${won ? '<i class="sb-win">WIN</i>' : ''}</h4>
+      <h4>${logo ? `<img src="${esc(logo)}" alt="" data-logo referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${esc(name)}${won ? '<i class="sb-win">WIN</i>' : ''}</h4>
       <table><thead><tr><th>选手</th><th>K</th><th>D</th><th>A</th><th>+/-</th><th>ADR</th></tr></thead><tbody>
       ${ps.map((p) => {
         const f = flag(p.cc);
@@ -338,6 +460,7 @@
         ? `<div class="sbs">${scoreTable(m, 1)}${scoreTable(m, 2)}</div><p class="dt-note">整场数据；ADR 为整场平均每回合伤害。</p>`
         : `<p class="dt-empty">${m.stats ? 'bo3 没有这场的选手数据' : '选手数据还在生成中：bo3 赛后解析完 demo（通常几小时，慢的要一天多）后，这里和 TG 结束消息会自动补上'}</p>`}
       <a class="btn dt-link" href="${esc(m.url)}" target="_blank" rel="noopener">在 bo3.gg 查看 ↗</a>`;
+    fixLogos($('#detail-body'));
     const dlg = $('#detail');
     if (!dlg.open) dlg.showModal();
     $('#detail-body').scrollTop = 0;
@@ -391,11 +514,11 @@
       <section class="admin-block"><h3>队伍 <span class="muted">${teams.length}</span></h3><div class="admin-body">
         <div class="field"><input type="search" id="team-q" placeholder="搜索队伍，如 Spirit" value="${esc(state.admin.q)}" autocomplete="off"></div>
         ${state.admin.search.length ? `<div class="rows">${state.admin.search.map((t) => `<div class="row">
-          <span class="row-main">${t.logo ? `<img src="${esc(t.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}<span class="row-title">${flag(t.cc)} ${esc(t.name)}</span>${t.rank ? `<span class="row-sub">#${t.rank}</span>` : ''}</span>
+          <span class="row-main">${t.logo ? `<img src="${esc(t.logo)}" alt="" data-logo referrerpolicy="no-referrer" onerror="this.remove()">` : ''}<span class="row-title">${flag(t.cc)} ${esc(t.name)}</span>${t.rank ? `<span class="row-sub">#${t.rank}</span>` : ''}</span>
           ${subIds.has(t.id) ? '<span class="badge badge-approved">已订阅</span>' : `<button class="btn btn-sm" data-act="team-add" data-id="${t.id}">订阅</button>`}
         </div>`).join('')}</div>` : ''}
         <div class="rows">${teams.length ? teams.map((t) => `<div class="row">
-          <span class="row-main">${t.logo ? `<img src="${esc(t.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}<span class="row-title">${flag(t.cc)} ${esc(t.name)}</span></span>
+          <span class="row-main">${t.logo ? `<img src="${esc(t.logo)}" alt="" data-logo referrerpolicy="no-referrer" onerror="this.remove()">` : ''}<span class="row-title">${flag(t.cc)} ${esc(t.name)}</span></span>
           <button class="btn btn-sm btn-danger" data-act="team-del" data-id="${t.id}">退订</button></div>`).join('') : '<p class="admin-hint">还没有订阅队伍</p>'}</div>
       </div></section>
 
@@ -479,7 +602,7 @@
     $('#subs').innerHTML = `<span class="subs-label">订阅</span>${
       subs.tiers.map((x) => `<span class="chip chip-tier">TIER ${esc(x.toUpperCase())}</span>`).join('')}${
       subs.stars ? `<span class="chip chip-tier">★ ≥ ${subs.stars}</span>` : ''}${
-      subs.teams.map((x) => `<span class="chip">${x.logo ? `<img src="${esc(x.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${flag(x.cc)} ${esc(x.name)}</span>`).join('')}${
+      subs.teams.map((x) => `<span class="chip">${x.logo ? `<img src="${esc(x.logo)}" alt="" data-logo referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${flag(x.cc)} ${esc(x.name)}</span>`).join('')}${
       !subs.tiers.length && !subs.teams.length && !subs.stars ? '<span class="muted">还没有订阅</span>' : ''}`;
 
     const stars = subTeamIds();
@@ -488,9 +611,16 @@
       $('#live-body').innerHTML = streamerStrip(d.rooms)
         + (live.length ? `<div class="grid">${live.map((m) => matchCard(m, stars)).join('')}</div>` : idleLine(upcoming));
       $('#upcoming-body').innerHTML = grouped(upcoming) || empty('暂无赛程', '订阅范围内 7 天内没有比赛');
+      const events = d.events || [];
+      $('#sec-events').hidden = !events.length; // 和订阅范围没有交集的赛事不展示；一个都没有就整块隐藏
+      $('#jump-events').hidden = !events.length;
+      $('#events-body').innerHTML = events.length ? eventList(events) : '';
       if (admin) $('#admin-body').innerHTML = adminPanel();
     });
+    $('#sc-events').textContent = (d.events || []).length || '';
+    $('#jc-events').textContent = (d.events || []).filter((e) => e.status === 'current').length || '';
     clampResults();
+    fixLogos();
     updateCurrent();
   }
 
@@ -706,6 +836,7 @@
   function applyScheme(s) {
     document.documentElement.dataset.scheme = s;
     store.set('sabonner.scheme', s);
+    requestAnimationFrame(() => fixLogos()); // 换配色后背景变了，重新判断队徽
     renderMenu();
   }
   function renderMenu() {
