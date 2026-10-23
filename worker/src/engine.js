@@ -16,6 +16,7 @@ import { matchesByTiers, matchesByTeams, matchesByStars, matchesByIds, attachTou
 import { roomInfo } from './douyu.js';
 import { preMsg, liveCard, mapEndMsg, endMsg, streamerLiveMsg, dailyMsg } from './format.js';
 import { enqueue, fanout, flush } from './outbox.js';
+import { tg } from './tgapi.js';
 
 const WINDOW = 7 * 86400;        // 只跟踪 7 天内的比赛
 const OUTBOX_RESERVE = 0;
@@ -52,6 +53,7 @@ export async function runCron(ctx) {
   await step('daily', () => dailyTick(ctx));
   if (minute % 60 === 7) await step('cleanup', () => cleanup(db));
   await step('flush', () => flush(ctx, OUTBOX_RESERVE));
+  await step('expire', () => expireTick(ctx));
 }
 
 // ---------- 赛程刷新 ----------
@@ -310,6 +312,30 @@ export async function statsTick(ctx) {
   }
   if (stmts.length) await db.batch(stmts);
   await enqueue(db, items);
+}
+
+// ---------- 短时消息到期删除（每分钟） ----------
+// 「地图 X 结束」只是提醒：比分已经同步到直播卡片上，发出 5 分钟后删掉。
+// Telegram 没有给单条消息设定时删除的接口（聊天级的自动删除最短 1 天，而且只能用户自己开），所以由 cron 来删
+const EXPIRE = { map: 5 * 60 };
+
+export async function expireTick(ctx) {
+  const db = ctx.env.DB;
+  const t = now();
+  const { results } = await db.prepare("SELECT chat_id, message_id FROM tg_msgs WHERE tag = 'map' AND sent_at <= ?").bind(t - EXPIRE.map).all();
+  if (!results.length) return;
+  const byChat = new Map();
+  for (const r of results) {
+    if (!byChat.has(r.chat_id)) byChat.set(r.chat_id, []);
+    byChat.get(r.chat_id).push(r.message_id);
+  }
+  const gone = [];
+  for (const [chat_id, ids] of byChat) {
+    if (ctx.left() <= 0) break; // 预算用完了，下一分钟接着删
+    const res = await tg(ctx, 'deleteMessages', { chat_id, message_ids: ids.slice(0, 100) });
+    if (res.ok || res.error_code === 400 || res.error_code === 403) gone.push(...ids.slice(0, 100).map((id) => `(${Number(chat_id)},${Number(id)})`));
+  }
+  if (gone.length) await db.prepare(`DELETE FROM tg_msgs WHERE (chat_id, message_id) IN (VALUES ${gone.join(',')})`).run();
 }
 
 // ---------- 斗鱼 ----------
