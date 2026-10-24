@@ -14,8 +14,8 @@
 //     POST   users/:id/approve|revoke 批准 / 撤销
 //     POST   refresh                  立即刷新赛程
 
-import { json, now, safeEqual } from './util.js';
-import { getSubs, listMatches, matchesStmt, subsStmts, subsFrom, parseMatchRow, eventsStmts, pickEvents } from './db.js';
+import { json, now, safeEqual, CORS } from './util.js';
+import { getSubs, matchesStmt, subsStmts, subsFrom, eventsStmts, pickEvents } from './db.js';
 import { matchUrl, stagesUrl, searchTeams, teamById } from './bo3.js';
 import { roomInfo } from './douyu.js';
 import { refreshSchedule, eventsTick } from './engine.js';
@@ -24,16 +24,46 @@ import { sendMessage } from './tgapi.js';
 
 const TIERS = ['s', 'a', 'b', 'c'];
 
-const pubMatch = (m) => ({
-  id: m.id, url: matchUrl(m), stage_url: stagesUrl(m),
-  team1: m.team1, team2: m.team2, team1_id: m.team1_id, team2_id: m.team2_id,
-  team1_cc: m.team1_cc, team2_cc: m.team2_cc, team1_logo: m.team1_logo, team2_logo: m.team2_logo,
-  team1_rank: m.team1_rank, team2_rank: m.team2_rank,
-  tournament: m.tournament, tournament_hltv: m.tournament_hltv, prize: m.prize, event_type: m.event_type,
-  stage: m.stage, tier: m.tier, stars: m.stars, bo: m.bo, start: m.start_ts,
-  status: m.status, s1: m.s1, s2: m.s2, winner_id: m.winner_id, maps: m.maps,
-  ai: m.ai_winner_id ? { winner_id: m.ai_winner_id, s1: m.ai_s1, s2: m.ai_s2 } : null,
-  stats: m.status === 'finished' && Array.isArray(m.stats) ? m.stats : null, // 赛后记分板；null 表示还没出
+// ---------- 响应里的 maps / stats 原样拼进去 ----------
+// 这两列在库里本来就是 JSON 字符串（我们自己 JSON.stringify 写进去的）。以前先 JSON.parse 再随整个响应
+// JSON.stringify 一遍，是这个接口最耗 CPU 的部分（赛果的记分板最大）；现在先放一个占位符，序列化后再把原文换进去
+const RAW = '\u0001R';
+const rawJsonArray = (v) => (typeof v === 'string' && v.startsWith('[') && v.endsWith(']') ? v : null);
+function withRaw(data, raws) {
+  return JSON.stringify(data).replace(/"\\u0001R(\d+)"/g, (_, i) => raws[Number(i)]);
+}
+
+// r：matches 表里的一行（没解析过）；raws：收集原文的数组
+const pubMatch = (r, raws) => {
+  const raw = (v) => { raws.push(v); return `${RAW}${raws.length - 1}`; };
+  const maps = rawJsonArray(r.maps) ?? '[]';
+  const stats = r.status === 'finished' ? rawJsonArray(r.stats) : null; // 赛后记分板；null 表示还没出
+  return {
+    id: r.id, url: matchUrl(r), stage_url: stagesUrl(r),
+    team1: r.team1, team2: r.team2, team1_id: r.team1_id, team2_id: r.team2_id,
+    team1_cc: r.team1_cc, team2_cc: r.team2_cc, team1_logo: r.team1_logo, team2_logo: r.team2_logo,
+    team1_rank: r.team1_rank, team2_rank: r.team2_rank,
+    tournament: r.tournament, tournament_hltv: r.tournament_hltv, prize: r.prize, event_type: r.event_type,
+    stage: r.stage, tier: r.tier, stars: r.stars, bo: r.bo, start: r.start_ts,
+    status: r.status, s1: r.s1, s2: r.s2, winner_id: r.winner_id, maps: raw(maps),
+    ai: r.ai_winner_id ? { winner_id: r.ai_winner_id, s1: r.ai_s1, s2: r.ai_s2 } : null,
+    stats: stats ? raw(stats) : null,
+  };
+};
+
+// ---------- 公开接口的短时缓存 ----------
+// 网页每 30 秒（有比赛时）/ 2 分钟拉一次，多人同时看时内容都一样。缓存在 Worker 实例的内存里 20 秒
+// （workers.dev 域名上 Cache API 不起作用，内存缓存哪里都能用）；管理操作成功后清掉，改完立即能看到
+const PUBLIC_TTL = 20_000;
+const memo = new Map(); // key -> { at, body }
+export const clearPublicCache = () => memo.clear();
+function cached(key, build) {
+  const hit = memo.get(key);
+  if (hit && Date.now() - hit.at < PUBLIC_TTL) return hit.body;
+  return build().then((body) => { memo.set(key, { at: Date.now(), body }); return body; });
+}
+const rawResponse = (body) => new Response(body, {
+  headers: { 'content-type': 'application/json; charset=utf-8', ...CORS, 'cache-control': 'public, max-age=20' },
 });
 
 const pubSubs = (s) => ({
@@ -46,42 +76,45 @@ export async function handleApi(req, env, path, ctx) {
   if (path.startsWith('/api/admin/')) return handleAdmin(req, env, path.slice('/api/admin/'.length), ctx);
 
   const db = env.DB;
-  const cache = { 'cache-control': 'public, max-age=20' };
 
   if (path === '/api/matches') {
     const scope = new URL(req.url).searchParams.get('scope') || 'upcoming';
     if (!['upcoming', 'live', 'results'].includes(scope)) return json({ error: 'bad scope' }, 400);
-    const list = await listMatches(db, scope, 50);
-    return json({ scope, now: now(), matches: list.map(pubMatch) }, 200, cache);
+    return rawResponse(await cached(`matches:${scope}`, async () => {
+      const { results } = await matchesStmt(db, scope, 50).all();
+      const raws = [];
+      return withRaw({ scope, now: now(), matches: results.map((r) => pubMatch(r, raws)) }, raws);
+    }));
   }
   if (path === '/api/overview') {
-    // 一次 batch 发完所有查询（以前是 6 次 D1 往返）
-    const res = await db.batch([
-      matchesStmt(db, 'upcoming', 40), matchesStmt(db, 'live'), matchesStmt(db, 'results', 30),
-      db.prepare('SELECT * FROM streamers ORDER BY live DESC, room_id'),
-      db.prepare("SELECT v FROM kv WHERE k = 'last_refresh'"),
-      ...subsStmts(db),
-      ...eventsStmts(db),
-    ]);
-    const [upcoming, live, results] = res.slice(0, 3).map((r) => r.results.map(parseMatchRow));
-    const rooms = res[3].results;
-    const last = res[4].results[0]?.v;
-    const subs = subsFrom(res.slice(5, 8));
-    const events = pickEvents(res.slice(8, 10), subs);
-    return json({
-      now: now(),
-      tz: env.TZ || 'Asia/Shanghai',
-      last_refresh: Number(last) || null,
-      upcoming: upcoming.map(pubMatch),
-      live: live.map(pubMatch),
-      results: results.map(pubMatch),
-      subs: pubSubs(subs),
-      events: events.map((e) => ({ ...e, url: `https://bo3.gg/tournaments/${e.slug}` })),
-      rooms: rooms.map((r) => ({
-        room_id: r.room_id, owner: r.owner, title: r.title, category: r.category, avatar: r.avatar,
-        live: !!r.live, changed_at: r.changed_at, show_time: r.show_time,
-      })),
-    }, 200, cache);
+    return rawResponse(await cached('overview', async () => {
+      // 一次 batch 发完所有查询（以前是 6 次 D1 往返）
+      const res = await db.batch([
+        matchesStmt(db, 'upcoming', 40), matchesStmt(db, 'live'), matchesStmt(db, 'results', 30),
+        db.prepare('SELECT * FROM streamers ORDER BY live DESC, room_id'),
+        db.prepare("SELECT v FROM kv WHERE k = 'last_refresh'"),
+        ...subsStmts(db),
+        ...eventsStmts(db),
+      ]);
+      const raws = [];
+      const [upcoming, live, results] = res.slice(0, 3).map((r) => r.results.map((m) => pubMatch(m, raws)));
+      const rooms = res[3].results;
+      const last = res[4].results[0]?.v;
+      const subs = subsFrom(res.slice(5, 8));
+      const events = pickEvents(res.slice(8, 10), subs);
+      return withRaw({
+        now: now(),
+        tz: env.TZ || 'Asia/Shanghai',
+        last_refresh: Number(last) || null,
+        upcoming, live, results,
+        subs: pubSubs(subs),
+        events: events.map((e) => ({ ...e, url: `https://bo3.gg/tournaments/${e.slug}` })),
+        rooms: rooms.map((r) => ({
+          room_id: r.room_id, owner: r.owner, title: r.title, category: r.category, avatar: r.avatar,
+          live: !!r.live, changed_at: r.changed_at, show_time: r.show_time,
+        })),
+      }, raws);
+    }));
   }
   return json({ error: 'not found' }, 404);
 }
@@ -89,6 +122,7 @@ export async function handleApi(req, env, path, ctx) {
 async function handleAdmin(req, env, sub, ctx) {
   const auth = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
   if (!safeEqual(auth, env.ADMIN_TOKEN)) return json({ error: 'unauthorized' }, 401);
+  if (req.method !== 'GET') clearPublicCache(); // 改了订阅 / 房间 / 用户：网页下一次读到的是新数据
 
   const db = env.DB;
   const method = req.method;

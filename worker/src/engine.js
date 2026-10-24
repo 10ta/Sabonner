@@ -1,16 +1,18 @@
 // cron 调度与事件引擎
 //
-// 每分钟一次：
-//   斗鱼开播检查          每分钟（房间多于 12 个时分组轮转）
-//   赛程刷新              每 10 分钟（这一分钟不做直播轮询，错开 CPU）
-//   直播轮询              其余分钟，且只在有比赛进行或即将开始时
-//   赛前提醒（30 分）     每分钟，只查 D1，不发外部请求（提前 1 天的预告并进了每日预报）
-//   清理                  每小时一次
-//   发件队列              最后，用掉剩余的子请求预算
+// cron 每分钟一次。免费版每次调用最多 10ms CPU（偶尔超出会被容忍，经常超出会被终止），
+// 所以按分钟错开，一次调用只做一件重活：
+//   偶数分钟（重活轮换，10 分钟一轮）：
+//     :x0 赛程刷新·tier   :x2 赛程刷新·队伍   :x4 赛程刷新·星级，并删掉不再命中订阅的比赛
+//     :x6 赛后数据        :x8 赛事列表（6 小时过期才请求 bo3）；每小时的 :08 改为清理旧数据
+//   奇数分钟（轻活，每 2 分钟一次）：一次 D1 batch 读完要用的状态，没事做的步骤直接跳过
+//     每日预报（UTC 0 点后）、直播轮询（有比赛进行或 30 分钟内开赛）、赛前 30 分钟提醒、斗鱼开播检查、
+//     地图消息到期删除、发件队列
+// 每次调用写一行「[cron] 做了什么」，Observability 里按这行分组就能看到每种任务各花多少 CPU
 //
 // 所有事件都先 claim 去重键，再入队，保证同一事件只推一次。
 
-import { now } from './util.js';
+import { now, SUBREQ_MAX } from './util.js';
 import { getSubs, getKV, setKVStmt, recipients, upsertMatchStmt, matchChanged, parseMatchRow, cleanup, KEEP_OLD, eventsStmts, pickEvents, subsStmts, subsFrom } from './db.js';
 import { matchesByTiers, matchesByTeams, matchesByStars, matchesByIds, attachTournaments, matchStats, eventList } from './bo3.js';
 import { roomInfo } from './douyu.js';
@@ -35,49 +37,103 @@ async function step(name, fn) {
 }
 
 export async function runCron(ctx) {
-  const db = ctx.env.DB;
   const t = now();
   const minute = Math.floor(t / 60);
+  const did = [];
+  if (minute % 2 === 0) await heavyTick(ctx, minute, did);
+  else await lightTick(ctx, minute, t, did);
+  console.log(`[cron] ${did.join(' ') || 'idle'}`);
+}
 
-  await step('douyu', () => douyuTick(ctx, minute));
+// ---------- 偶数分钟：一件重活 ----------
 
-  const lastRefresh = Number(await getKV(db, 'last_refresh')) || 0;
-  if (minute % 10 === 0 || t - lastRefresh > 15 * 60) {
-    await step('refresh', () => refreshSchedule(ctx));
+async function heavyTick(ctx, minute, did) {
+  const slot = minute % 10;
+  if (slot === 0 || slot === 2 || slot === 4) {
+    const part = ['tiers', 'teams', 'stars'][slot / 2];
+    const r = await step(`refresh:${part}`, () => refreshStep(ctx, part));
+    did.push(`refresh:${part}(${r?.tracked ?? 'err'})`);
+  } else if (slot === 6) {
+    const n = await step('stats', () => statsTick(ctx));
+    if (n) did.push(`stats(${n})`);
+  } else if (minute % 60 === 8) {
+    await step('cleanup', () => cleanup(ctx.env.DB));
+    did.push('cleanup');
   } else {
-    await step('live', () => liveTick(ctx, minute));
+    const n = await step('events', () => eventsTick(ctx));
+    if (n != null) did.push(`events(${n})`);
   }
+}
 
-  if (minute % 10 === 3) await step('stats', () => statsTick(ctx));
-  await step('remind', () => remindTick(ctx));
-  await step('daily', () => dailyTick(ctx));
-  if (minute % 60 === 7) await step('cleanup', () => cleanup(db));
-  if (minute % 10 === 7) await step('events', () => eventsTick(ctx));
-  await step('flush', () => flush(ctx, OUTBOX_RESERVE));
-  await step('expire', () => expireTick(ctx));
+// ---------- 奇数分钟：轻活 ----------
+
+const STALE_UPCOMING = 6 * 3600;   // 见 liveRowsStmt
+const EXPIRE = { map: 5 * 60 };    // 见 expireTick
+
+async function lightTick(ctx, minute, t, did) {
+  const db = ctx.env.DB;
+  const dayStart = t - (t % 86400);
+  const dailyKey = `daily:${new Date(dayStart * 1000).toISOString().slice(0, 10)}`;
+  // 一次往返读完这一分钟要用的全部状态（以前是 6、7 次 D1 往返）
+  const [live, remind, rooms, outbox, expire, daily] = await db.batch([
+    liveRowsStmt(db, minute, t),
+    remindRowsStmt(db, t),
+    db.prepare('SELECT * FROM streamers ORDER BY room_id'),
+    db.prepare('SELECT * FROM outbox ORDER BY id LIMIT ?').bind(SUBREQ_MAX),
+    db.prepare("SELECT chat_id, message_id FROM tg_msgs WHERE tag = 'map' AND sent_at <= ?").bind(t - EXPIRE.map),
+    db.prepare('SELECT 1 FROM sent WHERE key = ?').bind(dailyKey),
+  ]);
+
+  let queued = 0;
+  // 日志：做了的步骤都记一笔，入队了消息的带上条数，如 live:2+3 = 轮询 2 场、入队 3 条
+  const run = async (label, fn) => {
+    const n = await step(label.split(':')[0], fn);
+    did.push(n ? `${label}+${n}` : label);
+    queued += n || 0;
+  };
+  // 只在 UTC 0 点后的第一个小时内（正常是 00:01 那一次）
+  if (t - dayStart <= 3600 && !daily.results.length) await run('daily', () => dailyTick(ctx, dayStart, dailyKey));
+  if (live.results.length) await run(`live:${live.results.length}`, () => liveTick(ctx, minute, live.results));
+  if (remind.results.length) await run('remind', () => remindTick(ctx, remind.results));
+  if (rooms.results.length) await run('douyu', () => douyuTick(ctx, minute, rooms.results));
+  if (expire.results.length) {
+    await step('expire', () => expireTick(ctx, expire.results));
+    did.push(`expire(${expire.results.length})`);
+  }
+  // 这一次新入队了消息就重新读队列；否则用上面读到的（通常是空的，直接跳过）
+  if (queued || outbox.results.length) {
+    const r = await step('flush', () => flush(ctx, OUTBOX_RESERVE, queued ? null : outbox.results));
+    if (r?.sent) did.push(`sent(${r.sent})`);
+  }
 }
 
 // ---------- 赛程刷新 ----------
+// 三路订阅（tier、队伍、星级）取并集。cron 里分三分钟各拉一路（每次只解析一份 bo3 响应），
+// 第三路时用三路各自记下的比赛 id 删掉不再命中订阅的未来比赛；网页 / TG 里的「立即刷新」一次拉完三路
 
-export async function refreshSchedule(ctx) {
-  const db = ctx.env.DB;
-  const t = now();
-  const subs = await getSubs(db);
-  const teamIds = subs.teams.map((x) => x.team_id);
+const PARTS = ['tiers', 'teams', 'stars'];
+const PART_FRESH = 15 * 60;   // 别的几路的结果超过这么久就不用来删比赛（宁可留着也不误删）
 
-  // tier、队伍、星级三种订阅取并集（OR）
-  const [byTier, byTeam, byStars] = await Promise.all([
-    matchesByTiers(ctx, subs.tiers),
-    matchesByTeams(ctx, teamIds),
-    matchesByStars(ctx, subs.stars),
-  ]);
+function fetchPart(ctx, part, subs) {
+  if (part === 'tiers') return matchesByTiers(ctx, subs.tiers);
+  if (part === 'teams') return matchesByTeams(ctx, subs.teams.map((x) => x.team_id));
+  return matchesByStars(ctx, subs.stars);
+}
 
+// 要跟踪的比赛：有开赛时间、至少一队已定，进行中或 7 天内开赛
+function pick(list, t) {
   const map = new Map();
-  for (const m of [...byTier, ...byTeam, ...byStars]) {
+  for (const m of list) {
     if (!m.start_ts) continue;
     if (!m.team1_id && !m.team2_id) continue; // 两队都未定（TBD vs TBD）不跟踪；对阵确定后下次刷新自动补上
     if (m.status === 'current' || (m.status === 'upcoming' && m.start_ts <= t + WINDOW)) map.set(m.id, m);
   }
+  return map;
+}
+
+// 写入有变化的比赛（返回语句，调用方一起 batch）
+async function writeStmts(ctx, map, subs, byTeam) {
+  const db = ctx.env.DB;
   await attachTournaments(ctx, [...map.values()]); // 合并去重之后只查一次赛事信息
 
   // 只写有变化的比赛：先把库里现有的这些行读出来对比（读的额度比写宽得多）
@@ -93,13 +149,8 @@ export async function refreshSchedule(ctx) {
     if (m.status === 'current') { if (!old) stmts.push(upsertMatchStmt(db, m, true)); continue; }
     if (matchChanged(old, m)) stmts.push(upsertMatchStmt(db, m));
   }
-  // 不再命中订阅的未来比赛（退订、改期出窗口）删掉；10 分钟内要开的保留，避免误删
-  const keep = [...map.keys()];
-  stmts.push(db.prepare(
-    `DELETE FROM matches WHERE status = 'upcoming' AND start_ts > ?${keep.length ? ` AND id NOT IN (${keep.join(',')})` : ''}`,
-  ).bind(t + 600));
   // 旧版订阅的队伍没有国旗 / 队徽，从比赛数据里补上
-  for (const st of subs.teams) {
+  for (const st of byTeam ? subs.teams : []) {
     if (st.cc && st.logo) continue;
     const m = byTeam.find((x) => x.team1_id === st.team_id || x.team2_id === st.team_id);
     if (!m) continue;
@@ -107,7 +158,52 @@ export async function refreshSchedule(ctx) {
     stmts.push(db.prepare('UPDATE sub_teams SET cc = COALESCE(cc, ?), logo = COALESCE(logo, ?) WHERE team_id = ?')
       .bind(m[`team${side}_cc`], m[`team${side}_logo`], st.team_id));
   }
-  stmts.push(setKVStmt(db, 'last_refresh', t));
+  return stmts;
+}
+
+// 不再命中订阅的未来比赛（退订、改期出窗口）删掉；10 分钟内要开的保留，避免误删
+const pruneStmt = (db, keep, t) => db.prepare(
+  `DELETE FROM matches WHERE status = 'upcoming' AND start_ts > ?${keep.length ? ` AND id NOT IN (${keep.map(Number).filter(Number.isFinite).join(',')})` : ''}`,
+).bind(t + 600);
+const partStmt = (db, part, t, ids) => setKVStmt(db, `rf:${part}`, JSON.stringify({ at: t, ids }));
+
+// 一次拉完三路（网页、TG 里的手动刷新用）
+export async function refreshSchedule(ctx) {
+  const db = ctx.env.DB;
+  const t = now();
+  const subs = await getSubs(db);
+  const lists = await Promise.all(PARTS.map((p) => fetchPart(ctx, p, subs)));
+  const map = pick(lists.flat(), t);
+  const stmts = await writeStmts(ctx, map, subs, lists[1]);
+  stmts.push(pruneStmt(db, [...map.keys()], t), setKVStmt(db, 'last_refresh', t));
+  PARTS.forEach((p, i) => stmts.push(partStmt(db, p, t, [...pick(lists[i], t).keys()])));
+  await db.batch(stmts);
+  return { tracked: map.size };
+}
+
+// cron 里的一路
+export async function refreshStep(ctx, part) {
+  const db = ctx.env.DB;
+  const t = now();
+  const last = part === PARTS[PARTS.length - 1];
+  const res = await db.batch([...subsStmts(db), ...(last ? PARTS.slice(0, -1).map((p) => db.prepare('SELECT v FROM kv WHERE k = ?').bind(`rf:${p}`)) : [])]);
+  const subs = subsFrom(res.slice(0, 3));
+  const list = await fetchPart(ctx, part, subs);
+  const map = pick(list, t);
+  const stmts = await writeStmts(ctx, map, subs, part === 'teams' ? list : null);
+  stmts.push(partStmt(db, part, t, [...map.keys()]));
+  if (last) {
+    const keep = new Set(map.keys());
+    let fresh = true;
+    for (const r of res.slice(3)) {
+      let v = null;
+      try { v = JSON.parse(r.results[0]?.v || 'null'); } catch { /* 当没有 */ }
+      if (!v || t - v.at > PART_FRESH) { fresh = false; break; }
+      for (const id of v.ids) keep.add(id);
+    }
+    if (fresh) stmts.push(pruneStmt(db, [...keep], t));
+    stmts.push(setKVStmt(db, 'last_refresh', t));
+  }
   await db.batch(stmts);
   return { tracked: map.size };
 }
@@ -115,23 +211,25 @@ export async function refreshSchedule(ctx) {
 // ---------- 赛前提醒（开赛前 30 分钟） ----------
 // 提前 1 天的单条预告已经取消，由每日预报的「明日赛程」代替
 
-export async function remindTick(ctx) {
+// 每 2 分钟查一次，窗口前后各多留一点：刚开赛 3 分钟内的也算（去重键保证只提醒一次）
+const remindRowsStmt = (db, t) => db.prepare(
+  "SELECT * FROM matches WHERE status = 'upcoming' AND start_ts > ? AND start_ts <= ? ORDER BY start_ts",
+).bind(t - 180, t + 30 * 60 + 60);
+
+export async function remindTick(ctx, results) {
   const db = ctx.env.DB;
-  const t = now();
-  const { results } = await db.prepare(
-    "SELECT * FROM matches WHERE status = 'upcoming' AND start_ts > ? AND start_ts <= ? ORDER BY start_ts",
-  ).bind(t - 60, t + 30 * 60 + 60).all();
-  if (!results.length) return;
+  if (!results.length) return 0;
 
   // 键里带开赛时间：改期后会在新时间前 30 分钟再提醒一次
   const plan = results.map((m) => [`m30:${m.id}:${m.start_ts}`, m]);
   const got = await claim(db, plan.map((p) => p[0]));
-  if (!got.size) return;
+  if (!got.size) return 0;
 
   const to = await recipients(ctx.env);
   const items = [];
   for (const [key, m] of plan) if (got.has(key)) items.push(...fanout(to, 'send', preMsg(m, ctx.tz), m.id, 'pre'));
   await enqueue(db, items);
+  return items.length;
 }
 
 // ---------- 每日预报（UTC 0 点）：今日 + 明日赛程 ----------
@@ -155,19 +253,16 @@ export async function buildDaily(ctx, dayStart) {
     next.results[0] || null, stars, ctx.tz, events);
 }
 
-export async function dailyTick(ctx) {
-  const t = now();
-  const dayStart = t - (t % 86400);
-  if (t - dayStart > 3600) return; // 只在 UTC 0 点后的第一个小时内发（正常是 00:00 那一分钟）
+// 是否已发过、是否在 UTC 0 点后第一个小时内，由 lightTick 判断
+export async function dailyTick(ctx, dayStart, key) {
   const day = new Date(dayStart * 1000).toISOString().slice(0, 10);
-  const key = `daily:${day}`;
-  if (await ctx.env.DB.prepare('SELECT 1 FROM sent WHERE key = ?').bind(key).first()) return;
-  // 先生成再领取：生成时出错的话这一分钟不算数，下一分钟重试，不会丢掉当天的预报
+  // 先生成再领取：生成时出错的话这一次不算数，2 分钟后重试，不会丢掉当天的预报
   const text = await buildDaily(ctx, dayStart);
   const got = await claim(ctx.env.DB, [key]);
-  if (!got.size) return;
+  if (!got.size) return 0;
   const to = await recipients(ctx.env);
   await enqueue(ctx.env.DB, to.map((chat_id) => ({ chat_id, kind: 'daily', text, meta: day })));
+  return to.length;
 }
 
 // ---------- 直播轮询 ----------
@@ -184,9 +279,14 @@ export function seriesDecided(m) {
   return Math.max(s1, s2) > bo / 2 || s1 + s2 >= bo;
 }
 
-// 开赛 6 小时后 bo3 还标着「未开始」的比赛（多半是取消了没更新），每 10 分钟才查一次，
-// 免得一场「僵尸比赛」让直播轮询每分钟都去请求 bo3
-const STALE_UPCOMING = 6 * 3600;
+// 直播轮询要看的比赛：进行中，或 30 分钟内开赛（提前开赛也能及时发现）。
+// 开赛 6 小时后 bo3 还标着「未开始」的比赛（多半是取消了没更新）每 10 分钟才带上一次，
+// 免得一场「僵尸比赛」让直播轮询每次都去请求 bo3
+function liveRowsStmt(db, minute, t) {
+  const all = minute % 10 === 5;
+  return db.prepare(`SELECT * FROM matches WHERE status = 'current'
+    OR (status = 'upcoming' AND start_ts <= ?${all ? '' : ' AND start_ts > ?'})`).bind(...(all ? [t + 1800] : [t + 1800, t - STALE_UPCOMING]));
+}
 
 // 比赛已结束但最后一张图比分迟迟不来时，最多等这么久再发结束消息
 const MAP_WAIT = 20 * 60;
@@ -199,15 +299,11 @@ async function waitedTooLong(db, id, t) {
   return !r || t - r.at >= MAP_WAIT;
 }
 
-export async function liveTick(ctx, minute) {
+// results：liveRowsStmt 查出来的比赛（按 id 一次向 bo3 查完，不多花请求）
+export async function liveTick(ctx, minute, results) {
   const db = ctx.env.DB;
   const t = now();
-  // 开赛前 30 分钟起就纳入轮询（按 id 一次查完，不多花请求），提前开赛也能及时发现
-  const { results } = await db.prepare(
-    `SELECT * FROM matches WHERE status = 'current'
-      OR (status = 'upcoming' AND start_ts <= ?${minute % 10 === 5 ? '' : ' AND start_ts > ?'})`,
-  ).bind(...(minute % 10 === 5 ? [t + 1800] : [t + 1800, t - STALE_UPCOMING])).all();
-  if (!results.length) return;
+  if (!results.length) return 0;
 
   const olds = results.map(parseMatchRow);
   const fresh = new Map((await matchesByIds(ctx, olds.map((m) => m.id))).map((m) => [m.id, m]));
@@ -234,7 +330,7 @@ export async function liveTick(ctx, minute) {
       f.status = 'finished';
       if (!f.winner_id && f.s1 !== f.s2) f.winner_id = f.s1 > f.s2 ? f.team1_id : f.team2_id;
     } else if (f.status === 'finished' && !mapsComplete && !(await waitedTooLong(db, f.id, t))) {
-      f.status = 'current'; // 库里保持进行中，下一分钟继续轮询
+      f.status = 'current'; // 库里保持进行中，下一次继续轮询
     }
     // 地图、赛事信息（线下 / 线上、HLTV、奖金）这次没拿到时沿用库里的
     const m = { ...old, ...f };
@@ -275,6 +371,7 @@ export async function liveTick(ctx, minute) {
 
   if (stmts.length) await db.batch(stmts);
   await enqueue(db, items);
+  return items.length;
 }
 
 // ---------- 赛后数据（每 10 分钟） ----------
@@ -290,7 +387,7 @@ export async function statsTick(ctx) {
   const { results } = await db.prepare(
     "SELECT * FROM matches WHERE status = 'finished' AND stats IS NULL AND start_ts > ? ORDER BY start_ts DESC LIMIT 10",
   ).bind(t - STATS_GIVEUP - 86400).all();
-  if (!results.length) return;
+  if (!results.length) return 0;
 
   const olds = results.map(parseMatchRow);
   const fresh = new Map((await matchesByIds(ctx, olds.map((m) => m.id))).map((m) => [m.id, m]));
@@ -316,34 +413,28 @@ export async function statsTick(ctx) {
   }
   if (stmts.length) await db.batch(stmts);
   await enqueue(db, items);
+  return fetched;
 }
 
 // ---------- 赛事列表（每 6 小时） ----------
-// 每 10 分钟看一眼缓存时间，过期才请求 bo3（一天 4 次）
+// 每 10 分钟看一眼缓存时间，过期才请求 bo3（一天 4 次）。时间单独存一个键（events_at），
+// 不用为了看时间把整份赛事列表读出来解析
 const EVENTS_TTL = 6 * 3600;
 export async function eventsTick(ctx, force = false) {
   const db = ctx.env.DB;
   const t = now();
-  if (!force) {
-    const row = await db.prepare("SELECT v FROM kv WHERE k = 'events'").first();
-    let at = 0;
-    try { at = JSON.parse(row?.v || '{}').at || 0; } catch { /* 当没有 */ }
-    if (t - at < EVENTS_TTL) return;
-  }
+  if (!force && t - (Number(await getKV(db, 'events_at')) || 0) < EVENTS_TTL) return null;
   const list = await eventList(ctx);
-  await setKVStmt(db, 'events', JSON.stringify({ at: t, list })).run();
+  await db.batch([setKVStmt(db, 'events', JSON.stringify({ at: t, list })), setKVStmt(db, 'events_at', t)]);
   return list.length;
 }
 
-// ---------- 短时消息到期删除（每分钟） ----------
+// ---------- 短时消息到期删除（每 2 分钟） ----------
 // 「地图 X 结束」只是提醒：比分已经同步到直播卡片上，发出 5 分钟后删掉。
-// Telegram 没有给单条消息设定时删除的接口（聊天级的自动删除最短 1 天，而且只能用户自己开），所以由 cron 来删
-const EXPIRE = { map: 5 * 60 };
-
-export async function expireTick(ctx) {
+// Telegram 没有给单条消息设定时删除的接口（聊天级的自动删除最短 1 天，而且只能用户自己开），所以由 cron 来删。
+// results：到期的消息（lightTick 一起查好）
+export async function expireTick(ctx, results) {
   const db = ctx.env.DB;
-  const t = now();
-  const { results } = await db.prepare("SELECT chat_id, message_id FROM tg_msgs WHERE tag = 'map' AND sent_at <= ?").bind(t - EXPIRE.map).all();
   if (!results.length) return;
   const byChat = new Map();
   for (const r of results) {
@@ -352,7 +443,7 @@ export async function expireTick(ctx) {
   }
   const gone = [];
   for (const [chat_id, ids] of byChat) {
-    if (ctx.left() <= 0) break; // 预算用完了，下一分钟接着删
+    if (ctx.left() <= 0) break; // 预算用完了，下一次接着删
     const res = await tg(ctx, 'deleteMessages', { chat_id, message_ids: ids.slice(0, 100) });
     if (res.ok || res.error_code === 400 || res.error_code === 403) gone.push(...ids.slice(0, 100).map((id) => `(${Number(chat_id)},${Number(id)})`));
   }
@@ -361,16 +452,17 @@ export async function expireTick(ctx) {
 
 // ---------- 斗鱼 ----------
 
-export async function douyuTick(ctx, minute) {
+// all：全部房间（lightTick 一起查好）。每 2 分钟一次；房间多于 12 个时分组轮转
+export async function douyuTick(ctx, minute, all) {
   const db = ctx.env.DB;
   const t = now();
-  const { results: all } = await db.prepare('SELECT * FROM streamers ORDER BY room_id').all();
-  if (!all.length) return;
+  if (!all.length) return 0;
 
   let rooms = all;
   if (all.length > MAX_ROOMS_PER_TICK) {
     const groups = Math.ceil(all.length / MAX_ROOMS_PER_TICK);
-    rooms = all.filter((_, i) => i % groups === minute % groups);
+    const turn = Math.floor(minute / 2);
+    rooms = all.filter((_, i) => i % groups === turn % groups);
   }
 
   const infos = await Promise.allSettled(rooms.map((r) => roomInfo(ctx, r.room_id)));
@@ -401,8 +493,9 @@ export async function douyuTick(ctx, minute) {
   });
 
   if (stmts.length) await db.batch(stmts);
-  if (went.length) {
-    const to = await recipients(ctx.env);
-    await enqueue(db, went.flatMap((s) => fanout(to, 'send', streamerLiveMsg(s))));
-  }
+  if (!went.length) return 0;
+  const to = await recipients(ctx.env);
+  const items = went.flatMap((s) => fanout(to, 'send', streamerLiveMsg(s)));
+  await enqueue(db, items);
+  return items.length;
 }

@@ -1,4 +1,4 @@
-// 发件队列：所有推送先入队，再在预算内发出；发不完的留到下一分钟
+// 发件队列：所有推送先入队，再在预算内发出；发不完的留到下一次（cron 每 2 分钟发一次）
 // kind:
 //   send       普通消息
 //   live_open  直播卡片首发，记下 message_id 以便后续编辑
@@ -72,12 +72,15 @@ class Book {
 }
 const isTrigger = (r) => r.kind === 'live_open' || r.kind === 'daily' || r.tag === 'end';
 
-export async function flush(ctx, reserve = 0) {
+// prefetched：调用方已经读好的队列（cron 的轻活分钟一次 batch 读好），省一次 D1 往返；不传就自己读
+export async function flush(ctx, reserve = 0, prefetched = null) {
   const db = ctx.env.DB;
   const budget = ctx.left() - reserve;
   if (budget <= 0) return { sent: 0, pending: true };
 
-  const { results: rows } = await db.prepare('SELECT * FROM outbox ORDER BY id LIMIT ?').bind(budget).all();
+  const rows = prefetched
+    ? prefetched.slice(0, budget)
+    : (await db.prepare('SELECT * FROM outbox ORDER BY id LIMIT ?').bind(budget).all()).results;
   if (!rows.length) return { sent: 0, pending: false };
 
   // 需要的可编辑消息 id
@@ -132,7 +135,7 @@ export async function flush(ctx, reserve = 0) {
         ? await sendDaily(ctx, reserve, row, pins.get(row.chat_id), pinned, book)
         : await sendRow(ctx, reserve, row, key, msgMap, openPending, opened, done, book, endIds);
     } catch (e) {
-      // 网络异常：这条记一次失败，其余留到下一分钟（Telegram 大概率整体不可达）
+      // 网络异常：这条记一次失败，其余留到下一次（Telegram 大概率整体不可达）
       console.error('[outbox]', e?.message || e);
       retry.push(row.id);
       break;
@@ -140,7 +143,7 @@ export async function flush(ctx, reserve = 0) {
     if (res === null) continue;
 
     if (res.ok) { done.push(row.id); sent++; continue; }
-    if (res.error_code === 429) { retry.push(row.id); break; } // 被限流，下分钟再来
+    if (res.error_code === 429) { retry.push(row.id); break; } // 被限流，下次再来
     if (res.error_code === 403) { blocked.add(Number(row.chat_id)); done.push(row.id); continue; } // 用户拉黑 / 注销
     if (res.error_code === 400) { done.push(row.id); continue; } // 消息已删等，丢弃
     retry.push(row.id);
