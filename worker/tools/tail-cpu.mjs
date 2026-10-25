@@ -44,11 +44,15 @@ const wallOf = (e) => e.wallTime ?? e.wallTimeMs ?? e.wall_time ?? null;
 
 const cronLine = (e) => (e.logs || []).map((l) => (Array.isArray(l.message) ? l.message.join(' ') : String(l.message ?? '')))
   .find((m) => m.startsWith('[cron]'));
-// 往返次数：「| d1=2 bo3=1 tg=3」各项相加；旧版本没有这一段时为 null
+// 往返次数：「| d1=2 bo3=1 tg=3 n=5 first=flush」里 d1 和各外部请求相加；旧版本没有这一段时为 null。
+// cold：这个 isolate 的第一次 cron（n=1），或者这次有步骤是这个 isolate 里第一次跑（first=…，代码要先编译、缓存是空的）
+const TRIP_KEYS = new Set(['d1', 'bo3', 'douyu', 'tg', 'other']);
 function tripsOf(e) {
   const tail = cronLine(e)?.split(' | ')[1];
   if (!tail) return null;
-  return { total: tail.split(' ').reduce((n, kv) => n + (Number(kv.split('=')[1]) || 0), 0), text: tail };
+  const kv = Object.fromEntries(tail.split(' ').map((w) => w.split('=')));
+  const total = Object.entries(kv).reduce((n, [k, v]) => n + (TRIP_KEYS.has(k) ? Number(v) || 0 : 0), 0);
+  return { total, cold: kv.n === '1' || 'first' in kv, known: 'n' in kv };
 }
 
 // 任务名：[cron] 那行去掉数字和往返次数，如 "[cron] live:2+3 douyu | d1=2 bo3=1" → "douyu live"，"refresh:tier:a(41)" → "refresh:tier:a"
@@ -75,7 +79,9 @@ const f = (v) => (v == null ? '–' : v.toFixed(1));
 
 const groups = new Map();
 const slow = [];
-const pts = [];   // [往返次数, CPU]，拟合用
+const pts = [];   // [往返次数, CPU]，拟合用（只用热的调用）
+const coldCpu = [], warmCpu = [];
+const span = [Infinity, -Infinity];
 let total = 0, noCpu = 0, sample = null;
 for (const e of objects(fs.readFileSync(file, 'utf8'))) {
   if (!e || typeof e !== 'object' || !('outcome' in e || 'event' in e || 'logs' in e)) continue;
@@ -83,18 +89,22 @@ for (const e of objects(fs.readFileSync(file, 'utf8'))) {
   const cpu = cpuOf(e);
   if (cpu == null) { noCpu++; sample ??= e; continue; }
   const job = jobOf(e);
+  const tr = tripsOf(e);
+  if (tr?.known) (tr.cold ? coldCpu : warmCpu).push(Number(cpu));
   if (!groups.has(job)) groups.set(job, { cpu: [], wall: [], trips: [], bad: 0 });
   const g = groups.get(job);
   g.cpu.push(Number(cpu));
   const w = wallOf(e);
   if (w != null) g.wall.push(Number(w));
   if (e.outcome && e.outcome !== 'ok') g.bad++;
-  const tr = tripsOf(e);
-  if (tr) { g.trips.push(tr.total); pts.push([tr.total, Number(cpu)]); }
+  if (tr) { g.trips.push(tr.total); if (!tr.cold) pts.push([tr.total, Number(cpu)]); }
+  const ts = Number(e.eventTimestamp) || null;
+  if (ts) { span[0] = Math.min(span[0], ts); span[1] = Math.max(span[1], ts); }
   if (Number(cpu) > LIMIT) slow.push({ cpu: Number(cpu), wall: w, line: cronLine(e) || job, outcome: e.outcome, t: e.eventTimestamp });
 }
 
-console.log(`共 ${total} 次调用${noCpu ? `，其中 ${noCpu} 次没有 CPU 时间字段` : ''}`);
+const hhmm = (ts) => new Date(ts).toISOString().slice(11, 19);
+console.log(`共 ${total} 次调用${noCpu ? `，其中 ${noCpu} 次没有 CPU 时间字段` : ''}${span[0] < Infinity ? `（UTC ${hhmm(span[0])} – ${hhmm(span[1])}）` : ''}`);
 if (noCpu === total) {
   console.log('这份 tail 输出里没有每次调用的 CPU 时间。顶层字段有：', Object.keys(sample || {}).join(', '));
   console.log('请改用本地测量：node tools/profile.mjs record <网址> && node tools/profile.mjs');
@@ -110,18 +120,22 @@ for (const [job, g] of rows) {
     g.cpu.filter((v) => v > LIMIT).length, f(pct(g.wall, 0.5)), f(mean(g.trips)), g.bad].join('\t'));
 }
 
-// CPU ≈ a + b × 往返次数（最小二乘）：b 就是每次往返的 CPU 成本
+if (coldCpu.length || warmCpu.length) {
+  const line = (name, a) => `${name} ${a.length} 次：P50 ${f(pct(a, 0.5))}ms  P90 ${f(pct(a, 0.9))}ms  最大 ${a.length ? f(Math.max(...a)) : '–'}ms  超过 ${LIMIT}ms 的 ${a.filter((v) => v > LIMIT).length} 次`;
+  console.log(`\n${line('冷（isolate 第一次 cron，或有步骤第一次跑）', coldCpu)}\n${line('热', warmCpu)}`);
+}
+// CPU ≈ a + b × 往返次数（最小二乘，只用热的调用）：b 就是每次往返的 CPU 成本
 if (pts.length >= 5) {
   const mx = mean(pts.map((p) => p[0])), my = mean(pts.map((p) => p[1]));
   const sxx = pts.reduce((s, [x]) => s + (x - mx) ** 2, 0);
   if (sxx > 0) {
     const b = pts.reduce((s, [x, y]) => s + (x - mx) * (y - my), 0) / sxx;
-    console.log(`\n拟合（${pts.length} 次）：CPU ≈ ${f(my - b * mx)} + ${f(b)} × 往返次数 ms`);
+    console.log(`\n拟合（热的 ${pts.length} 次）：CPU ≈ ${f(my - b * mx)} + ${f(b)} × 往返次数 ms`);
   }
 }
 if (slow.length) {
   console.log(`\n超过 ${LIMIT}ms 的调用（最多列 20 次，时间是 UTC）：`);
   for (const s of slow.sort((a, b) => b.cpu - a.cpu).slice(0, 20)) {
-    console.log(`  ${f(s.cpu)}ms  墙钟 ${f(s.wall)}ms  ${s.t ? new Date(s.t).toISOString().slice(11, 19) : ''}  ${s.outcome !== 'ok' ? s.outcome + '  ' : ''}${s.line}`);
+    console.log(`  ${f(s.cpu)}ms  墙钟 ${f(s.wall)}ms  ${s.t ? hhmm(s.t) : ''}  ${s.outcome !== 'ok' ? s.outcome + '  ' : ''}${s.line}`);
   }
 }

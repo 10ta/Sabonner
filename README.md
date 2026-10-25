@@ -275,7 +275,7 @@ cron 每分钟一次。免费版**每次调用最多 10ms CPU**（偶尔超出�
 - **一张图开打后 20 分钟内不问**：只报到地图级比分，一张图最快也要二十多分钟。所以「地图 X 结束」和卡片上的比分一般比实际晚 2–4 分钟（轮询间隔 + 下一次才发），偶尔一张特别快的图会晚一点。
 - **赛后数据只在比赛结束后 1、2、4、8 小时各查一次**，8 小时后还没有就不再等（bo3 解析 demo 通常一到几小时）。网页、TG 里的「立即刷新」还是一次拉完。
 
-每次 cron 在日志里留一行，如 `[cron] live:2+3 douyu pending | d1=3 bo3=1 douyu=1`（轮询 2 场比赛、入队 3 条消息、查了斗鱼、队列里还有没发的；这一分钟 3 次 D1 往返、bo3 和斗鱼各 1 个请求）、`[cron] refresh:tier:a(41) | d1=3 bo3=1`，可以在 Observability 里看每分钟做了什么。CPU 时间不在这条日志上（Workers Logs 只把它记在调用本身），各 Worker 的 CPU P50 / P90 / P99 在 Sonde 的 Workers 卡片或控制台 Metrics 里看。
+每次 cron 在日志里留一行，如 `[cron] live:2+3 douyu pending | d1=3 bo3=1 douyu=1 n=12`（轮询 2 场比赛、入队 3 条消息、查了斗鱼、队列里还有没发的；这一分钟 3 次 D1 往返、bo3 和斗鱼各 1 个请求；这是这个 isolate 的第 12 次 cron。带 `first=live` 表示这一步是这个 isolate 里第一次跑，代码要先编译、内存缓存是空的，CPU 会多一些）、`[cron] refresh:tier:a(41) | d1=3 bo3=1`，可以在 Observability 里看每分钟做了什么。CPU 时间不在这条日志上（Workers Logs 只把它记在调用本身），各 Worker 的 CPU P50 / P90 / P99 在 Sonde 的 Workers 卡片或控制台 Metrics 里看。
 
 **存储上限**：比赛数据在 D1 里只保留开赛后 7 天，另外最多 3000 行（超出时删最旧的）；推送去重记录 30 天，发件队列 6 小时，赛事缓存 30 天，已发消息记录 48 小时（用于自动删除）。清理每小时跑一次，数据库通常只有几百 KB。
 
@@ -292,7 +292,7 @@ npx wrangler tail sabonner --format json > tail.json   # 25 分钟后 Ctrl+C
 node tools/tail-cpu.mjs tail.json
 ```
 
-输出每种任务的 CPU 和平均往返次数、「CPU ≈ a + b × 往返次数」的拟合（b 就是线上每次往返的 CPU 成本），以及每一次超过 10ms 的调用和它那一行 `[cron]` 日志。
+输出每种任务的 CPU 和平均往返次数、「CPU ≈ a + b × 往返次数」的拟合（b 就是线上每次往返的 CPU 成本），冷 / 热调用分开的统计（冷 = isolate 第一次 cron 或有步骤第一次跑，拟合只用热的），以及每一次超过 10ms 的调用和它那一行 `[cron]` 日志。
 
 如果提示 tail 输出里没有 CPU 时间字段，就用下面的本地测量。
 

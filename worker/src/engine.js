@@ -35,7 +35,15 @@ export async function claim(db, keys) {
 // 接收推送的人：轻活分钟已经和别的查询一起读好放在 ctx.to；其余情况再单独查一次
 const toOf = async (ctx) => (ctx.to ??= await recipients(ctx.env));
 
+// 这个 isolate 里跑过哪些步骤：第一次跑某段代码时 V8 要先编译它、内存缓存（国家代码等）也是空的，CPU 会明显多一些。
+// 日志里标出来（n=这个 isolate 第几次 cron，first=这次第一次跑的步骤），tools/tail-cpu.mjs 据此把冷的和热的分开统计
+const seenSteps = new Set();
+let isoCalls = 0;
+let firstSteps = [];
+
 async function step(name, fn) {
+  const k = name.split(':')[0];
+  if (!seenSteps.has(k)) { seenSteps.add(k); firstSteps.push(k); }
   try { return await fn(); } catch (e) { console.error(`[${name}]`, e?.stack || e); return null; }
 }
 
@@ -44,9 +52,12 @@ export async function runCron(ctx) {
   const minute = Math.floor(t / 60);
   const did = [];
   countD1(ctx);
+  isoCalls++;
+  firstSteps = [];
   if (minute % 2 === 0) await heavyTick(ctx, minute, did);
   else await lightTick(ctx, minute, t, did);
-  console.log(`[cron] ${did.join(' ') || 'idle'} | ${tripsText(ctx)}`);
+  const iso = `n=${isoCalls}${firstSteps.length ? ` first=${firstSteps.join(',')}` : ''}`;
+  console.log(`[cron] ${did.join(' ') || 'idle'} | ${tripsText(ctx)} ${iso}`);
 }
 
 // ---------- 偶数分钟：一件重活 ----------
