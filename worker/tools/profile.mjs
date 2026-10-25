@@ -283,7 +283,7 @@ if (session) {
 if (COLD) {
   const { execFileSync } = await import('node:child_process');
   say('\n每种任务在全新进程里第一次跑（没预热过的 V8；每个子进程只跑这一分钟，数据库是第 1 轮之后的状态）');
-  say('这是上限：线上实例如果一直没被回收，实际会接近上面「预热后」的数');
+  say('线上的 cron 实测每次都在新的 isolate 里跑（日志里都是 n=1），所以这一栏才是最接近线上的数；「预热后」只对网页请求有参考意义');
   const seen = new Set();
   for (let i = 0; i < 20; i++) {
     const k = jobKey(cold[i].line);

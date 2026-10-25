@@ -6,6 +6,17 @@ export const now = () => Math.floor(Date.now() / 1000);
 export const esc = (s) =>
   String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+// 没有夏令时的常见时区直接按固定偏移算，不用 Intl：线上每次 cron 都是新的 isolate（日志里 n=1），
+// 第一次 new Intl.DateTimeFormat 要加载时区和中文的日期数据，本地实测 13ms（之后每次只要几微秒，但线上用不到「之后」）。
+// 其他时区（如 America/New_York，有夏令时）照旧用 Intl
+const FIXED_TZ = {
+  'Asia/Shanghai': 480, 'Asia/Chongqing': 480, 'Asia/Harbin': 480, 'Asia/Urumqi': 480, 'PRC': 480,
+  'Asia/Hong_Kong': 480, 'Asia/Macau': 480, 'Asia/Taipei': 480, 'Asia/Singapore': 480, 'Asia/Kuala_Lumpur': 480, 'Asia/Manila': 480,
+  'Asia/Tokyo': 540, 'Asia/Seoul': 540, 'UTC': 0, 'Etc/UTC': 0, 'Etc/GMT': 0, 'GMT': 0,
+};
+const WEEKDAY = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+const pad2 = (n) => String(n).padStart(2, '0');
+
 const fmtCache = new Map();
 function fmt(tz) {
   if (!fmtCache.has(tz)) {
@@ -23,7 +34,12 @@ export function fmtTime(ts, tz = 'Asia/Shanghai') {
   return `${p.month}/${p.day} ${p.weekday} ${p.hour}:${p.minute}`;
 }
 
-const parts = (ts, tz) => Object.fromEntries(fmt(tz).formatToParts(new Date(ts * 1000)).map((x) => [x.type, x.value]));
+function parts(ts, tz) {
+  const off = FIXED_TZ[tz];
+  if (off == null) return Object.fromEntries(fmt(tz).formatToParts(new Date(ts * 1000)).map((x) => [x.type, x.value]));
+  const d = new Date((ts + off * 60) * 1000);
+  return { month: pad2(d.getUTCMonth() + 1), day: pad2(d.getUTCDate()), weekday: WEEKDAY[d.getUTCDay()], hour: pad2(d.getUTCHours()), minute: pad2(d.getUTCMinutes()) };
+}
 
 // "10/11 周日"
 export function fmtDate(ts, tz = 'Asia/Shanghai') {

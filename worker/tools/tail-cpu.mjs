@@ -97,7 +97,7 @@ for (const e of objects(fs.readFileSync(file, 'utf8'))) {
   const w = wallOf(e);
   if (w != null) g.wall.push(Number(w));
   if (e.outcome && e.outcome !== 'ok') g.bad++;
-  if (tr) { g.trips.push(tr.total); if (!tr.cold) pts.push([tr.total, Number(cpu)]); }
+  if (tr) { g.trips.push(tr.total); pts.push([tr.total, Number(cpu), tr.cold]); }
   const ts = Number(e.eventTimestamp) || null;
   if (ts) { span[0] = Math.min(span[0], ts); span[1] = Math.max(span[1], ts); }
   if (Number(cpu) > LIMIT) slow.push({ cpu: Number(cpu), wall: w, line: cronLine(e) || job, outcome: e.outcome, t: e.eventTimestamp });
@@ -125,12 +125,16 @@ if (coldCpu.length || warmCpu.length) {
   console.log(`\n${line('冷（isolate 第一次 cron，或有步骤第一次跑）', coldCpu)}\n${line('热', warmCpu)}`);
 }
 // CPU ≈ a + b × 往返次数（最小二乘，只用热的调用）：b 就是每次往返的 CPU 成本
-if (pts.length >= 5) {
+if (warmCpu.length === 0 && coldCpu.length) console.log('全部是冷的：cron 每次都在新的 isolate 里跑，内存缓存用不上，每段代码都是第一次执行');
+// 热的够多就只用热的拟合，否则（比如全是冷的）用全部
+const fitPts = pts.filter((p) => !p[2]).length >= 5 ? pts.filter((p) => !p[2]) : pts;
+if (fitPts.length >= 5) {
+  const pts = fitPts;
   const mx = mean(pts.map((p) => p[0])), my = mean(pts.map((p) => p[1]));
   const sxx = pts.reduce((s, [x]) => s + (x - mx) ** 2, 0);
   if (sxx > 0) {
     const b = pts.reduce((s, [x, y]) => s + (x - mx) * (y - my), 0) / sxx;
-    console.log(`\n拟合（热的 ${pts.length} 次）：CPU ≈ ${f(my - b * mx)} + ${f(b)} × 往返次数 ms`);
+    console.log(`\n拟合（${pts === fitPts && pts.some((p) => p[2]) ? '全部' : '热的'} ${pts.length} 次）：CPU ≈ ${f(my - b * mx)} + ${f(b)} × 往返次数 ms`);
   }
 }
 if (slow.length) {
