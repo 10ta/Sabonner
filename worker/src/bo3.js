@@ -146,6 +146,12 @@ export async function matchesByTeams(ctx, teamIds, limit = 30) {
   return [...a, ...b];
 }
 
+// 订阅的队伍作为 side 方（1 = team1，2 = team2）的比赛；cron 里两侧分两分钟查，每次只解析一份响应
+export async function matchesByTeamSide(ctx, teamIds, side, limit = 30) {
+  if (!teamIds.length) return [];
+  return matches(ctx, buildUrl('matches', [ACTIVE, [`matches.team${side}_id`, 'in', teamIds.join(',')]], { ...MATCH_EXTRA, 'page[limit]': limit }));
+}
+
 // 直播轮询用：连同每张图的数据一起取，省掉逐场查地图的请求
 export async function matchesByIds(ctx, ids) {
   if (!ids.length) return [];

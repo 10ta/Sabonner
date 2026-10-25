@@ -1,10 +1,9 @@
 // cron 调度与事件引擎
 //
 // cron 每分钟一次。免费版每次调用最多 10ms CPU（偶尔超出会被容忍，经常超出会被终止），
-// 所以按分钟错开，一次调用只做一件重活：
-//   偶数分钟（重活轮换，10 分钟一轮）：
-//     :x0 赛程刷新·tier   :x2 赛程刷新·队伍   :x4 赛程刷新·星级，并删掉不再命中订阅的比赛
-//     :x6 赛后数据        :x8 赛事列表（6 小时过期才请求 bo3）；每小时的 :08 改为清理旧数据
+// 最耗 CPU 的是解析 bo3 的大响应，所以按分钟错开，一次调用最多发一个 bo3 列表请求：
+//   偶数分钟（重活轮换，20 分钟一轮，见 HEAVY）：赛程刷新按 tier 逐个、作为队伍 1 / 队伍 2、星级各占一分钟，
+//     一轮最后一个顺带删掉不再命中订阅的比赛；中间穿插赛后数据（每 10 分钟）和赛事列表 / 清理
 //   奇数分钟（轻活，每 2 分钟一次）：一次 D1 batch 读完要用的状态，没事做的步骤直接跳过
 //     每日预报（UTC 0 点后）、直播轮询（有比赛进行或 30 分钟内开赛）、赛前 30 分钟提醒、斗鱼开播检查、
 //     地图消息到期删除、发件队列
@@ -14,7 +13,7 @@
 
 import { now, SUBREQ_MAX } from './util.js';
 import { getSubs, getKV, setKVStmt, recipients, upsertMatchStmt, matchChanged, parseMatchRow, cleanup, KEEP_OLD, eventsStmts, pickEvents, subsStmts, subsFrom } from './db.js';
-import { matchesByTiers, matchesByTeams, matchesByStars, matchesByIds, attachTournaments, matchStats, eventList } from './bo3.js';
+import { matchesByTiers, matchesByTeams, matchesByTeamSide, matchesByStars, matchesByIds, attachTournaments, matchStats, eventList } from './bo3.js';
 import { roomInfo } from './douyu.js';
 import { preMsg, liveCard, mapEndMsg, endMsg, streamerLiveMsg, dailyMsg } from './format.js';
 import { enqueue, fanout, flush } from './outbox.js';
@@ -46,22 +45,23 @@ export async function runCron(ctx) {
 }
 
 // ---------- 偶数分钟：一件重活 ----------
+// 20 分钟一轮、10 个偶数分钟。tier 按订阅的顺序取第 0–3 个（没订阅那么多就空着），
+// team1 / team2 = 订阅的队伍作为队伍 1 / 队伍 2 的比赛（bo3 不支持 OR，只能分两次查）
+const HEAVY = ['tier:0', 'team1', 'stats', 'tier:1', 'team2', 'events', 'tier:2', 'stars', 'stats', 'tier:3'];
 
 async function heavyTick(ctx, minute, did) {
-  const slot = minute % 10;
-  if (slot === 0 || slot === 2 || slot === 4) {
-    const part = ['tiers', 'teams', 'stars'][slot / 2];
-    const r = await step(`refresh:${part}`, () => refreshStep(ctx, part));
-    did.push(`refresh:${part}(${r?.tracked ?? 'err'})`);
-  } else if (slot === 6) {
+  const job = HEAVY[Math.floor(minute / 2) % HEAVY.length];
+  if (job === 'stats') {
     const n = await step('stats', () => statsTick(ctx));
     if (n) did.push(`stats(${n})`);
-  } else if (minute % 60 === 8) {
-    await step('cleanup', () => cleanup(ctx.env.DB));
-    did.push('cleanup');
-  } else {
+  } else if (job === 'events') {
+    // 赛事列表 6 小时才过期一次，没过期时这一分钟拿来清理旧数据（只用 D1）
     const n = await step('events', () => eventsTick(ctx));
     if (n != null) did.push(`events(${n})`);
+    else { await step('cleanup', () => cleanup(ctx.env.DB)); did.push('cleanup'); }
+  } else {
+    const r = await step(`refresh:${job}`, () => refreshStep(ctx, job, job === HEAVY[HEAVY.length - 1]));
+    if (r) did.push(`refresh:${r.part}(${r.tracked})`);
   }
 }
 
@@ -108,15 +108,23 @@ async function lightTick(ctx, minute, t, did) {
 }
 
 // ---------- 赛程刷新 ----------
-// 三路订阅（tier、队伍、星级）取并集。cron 里分三分钟各拉一路（每次只解析一份 bo3 响应），
-// 第三路时用三路各自记下的比赛 id 删掉不再命中订阅的未来比赛；网页 / TG 里的「立即刷新」一次拉完三路
+// 订阅（tier、队伍、星级）取并集。cron 里每一部分（每个 tier、队伍 1、队伍 2、星级）各占一分钟，
+// 每次只解析一份 bo3 响应；每部分记下自己命中的比赛 id（kv rf:<部分>），一轮最后用所有部分的 id 删掉不再命中订阅的未来比赛。
+// 网页 / TG 里的「立即刷新」一次拉完
 
-const PARTS = ['tiers', 'teams', 'stars'];
-const PART_FRESH = 15 * 60;   // 别的几路的结果超过这么久就不用来删比赛（宁可留着也不误删）
+const PART_FRESH = 30 * 60;   // 某一部分的结果超过这么久没更新，这一轮就不删比赛（宁可留着也不误删）
+
+// 当前订阅对应的全部部分
+const partsOf = (subs) => [
+  ...subs.tiers.map((t) => `tier:${t}`),
+  ...(subs.teams.length ? ['team1', 'team2'] : []),
+  ...(subs.stars ? ['stars'] : []),
+];
 
 function fetchPart(ctx, part, subs) {
-  if (part === 'tiers') return matchesByTiers(ctx, subs.tiers);
-  if (part === 'teams') return matchesByTeams(ctx, subs.teams.map((x) => x.team_id));
+  if (part.startsWith('tier:')) return matchesByTiers(ctx, [part.slice(5)]);
+  const ids = subs.teams.map((x) => x.team_id);
+  if (part === 'team1' || part === 'team2') return matchesByTeamSide(ctx, ids, part === 'team1' ? 1 : 2);
   return matchesByStars(ctx, subs.stars);
 }
 
@@ -167,45 +175,66 @@ const pruneStmt = (db, keep, t) => db.prepare(
 ).bind(t + 600);
 const partStmt = (db, part, t, ids) => setKVStmt(db, `rf:${part}`, JSON.stringify({ at: t, ids }));
 
-// 一次拉完三路（网页、TG 里的手动刷新用）
+// 一次拉完（网页、TG 里的手动刷新用）。tier 合成一个请求、队伍两侧并发，和以前一样
 export async function refreshSchedule(ctx) {
   const db = ctx.env.DB;
   const t = now();
   const subs = await getSubs(db);
-  const lists = await Promise.all(PARTS.map((p) => fetchPart(ctx, p, subs)));
-  const map = pick(lists.flat(), t);
-  const stmts = await writeStmts(ctx, map, subs, lists[1]);
+  const [byTier, byTeam, byStars] = await Promise.all([
+    matchesByTiers(ctx, subs.tiers),
+    matchesByTeams(ctx, subs.teams.map((x) => x.team_id)),
+    matchesByStars(ctx, subs.stars),
+  ]);
+  const map = pick([...byTier, ...byTeam, ...byStars], t);
+  const stmts = await writeStmts(ctx, map, subs, byTeam);
   stmts.push(pruneStmt(db, [...map.keys()], t), setKVStmt(db, 'last_refresh', t));
-  PARTS.forEach((p, i) => stmts.push(partStmt(db, p, t, [...pick(lists[i], t).keys()])));
+  // 各部分的 id 也记下来，cron 下一轮删比赛时用得上
+  const ids = [...map.keys()];
+  for (const p of partsOf(subs)) stmts.push(partStmt(db, p, t, ids));
   await db.batch(stmts);
   return { tracked: map.size };
 }
 
-// cron 里的一路
-export async function refreshStep(ctx, part) {
+// cron 里的一部分。slot：'tier:0'..'tier:3' / 'team1' / 'team2' / 'stars'；last：这一轮的最后一个，顺带删比赛
+export async function refreshStep(ctx, slot, last = false) {
   const db = ctx.env.DB;
   const t = now();
-  const last = part === PARTS[PARTS.length - 1];
-  const res = await db.batch([...subsStmts(db), ...(last ? PARTS.slice(0, -1).map((p) => db.prepare('SELECT v FROM kv WHERE k = ?').bind(`rf:${p}`)) : [])]);
-  const subs = subsFrom(res.slice(0, 3));
-  const list = await fetchPart(ctx, part, subs);
-  const map = pick(list, t);
-  const stmts = await writeStmts(ctx, map, subs, part === 'teams' ? list : null);
-  stmts.push(partStmt(db, part, t, [...map.keys()]));
+  const res = await db.batch(subsStmts(db));
+  const subs = subsFrom(res);
+  let part = slot;
+  if (slot.startsWith('tier:')) {
+    const tier = subs.tiers[Number(slot.slice(5))];
+    part = tier ? `tier:${tier}` : null;
+  } else if ((slot === 'team1' || slot === 'team2') && !subs.teams.length) part = null;
+  else if (slot === 'stars' && !subs.stars) part = null;
+
+  const stmts = [];
+  let own = [];
+  if (part) {
+    const list = await fetchPart(ctx, part, subs);
+    const map = pick(list, t);
+    own = [...map.keys()];
+    stmts.push(...await writeStmts(ctx, map, subs, part.startsWith('team') ? list : null));
+    stmts.push(partStmt(db, part, t, own), setKVStmt(db, 'last_refresh', t));
+  }
   if (last) {
-    const keep = new Set(map.keys());
-    let fresh = true;
-    for (const r of res.slice(3)) {
+    // 当前订阅的每个部分都要有近 PART_FRESH 内的结果，才用它们的并集删比赛
+    const parts = partsOf(subs).filter((p) => p !== part);
+    const rows = parts.length
+      ? (await db.prepare(`SELECT k, v FROM kv WHERE k IN (${parts.map(() => '?').join(',')})`).bind(...parts.map((p) => `rf:${p}`)).all()).results
+      : [];
+    const keep = new Set(own);
+    let fresh = rows.length === parts.length;
+    for (const r of rows) {
       let v = null;
-      try { v = JSON.parse(r.results[0]?.v || 'null'); } catch { /* 当没有 */ }
+      try { v = JSON.parse(r.v); } catch { /* 当没有 */ }
       if (!v || t - v.at > PART_FRESH) { fresh = false; break; }
       for (const id of v.ids) keep.add(id);
     }
     if (fresh) stmts.push(pruneStmt(db, [...keep], t));
-    stmts.push(setKVStmt(db, 'last_refresh', t));
   }
-  await db.batch(stmts);
-  return { tracked: map.size };
+  if (stmts.length) await db.batch(stmts);
+  return part || last ? { part: part || slot, tracked: own.length } : null;
 }
 
 // ---------- 赛前提醒（开赛前 30 分钟） ----------
