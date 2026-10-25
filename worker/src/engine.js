@@ -71,6 +71,9 @@ async function heavyTick(ctx, minute, did) {
 // ---------- 奇数分钟：轻活 ----------
 
 const STALE_UPCOMING = 6 * 3600;   // 见 liveRowsStmt
+// 每次 cron 最多发几个 Telegram 请求（发送、编辑、置顶、删除都算）。线上每个外部请求约 2–3ms CPU，
+// 一次发太多会超过免费版每次 10ms 的上限；多出来的留在队列里，下一次（2 分钟后）接着发
+const TG_PER_TICK = 3;
 const EXPIRE = { map: 5 * 60 };    // 见 expireTick
 
 async function lightTick(ctx, minute, t, did) {
@@ -104,15 +107,19 @@ async function lightTick(ctx, minute, t, did) {
     await run(`live:${live.results.length}`, () => liveTick(ctx, minute, live.results, new Set(claimed.results.map((r) => r.key))));
   }
   if (remind.results.length) await run('remind', () => remindTick(ctx, remind.results));
-  if (rooms.results.length) await run('douyu', () => douyuTick(ctx, minute, rooms.results));
-  if (expire.results.length) {
-    await step('expire', () => expireTick(ctx, expire.results));
-    did.push(`expire(${expire.results.length})`);
-  }
-  // 这一次新入队了消息，或者队列里还有上次没发完的，才去发（队列空着就跳过，不多一次 D1）
-  if (queued || outbox.results.length) {
+  // 有消息要发的时候，斗鱼隔一次再查（省一个外部请求的 CPU 给发消息）；最坏 4 分钟查一次
+  const sending = queued > 0 || outbox.results.length > 0;
+  if (rooms.results.length && !(sending && Math.floor(minute / 2) % 2 === 0)) await run('douyu', () => douyuTick(ctx, minute, rooms.results));
+  // 从这里起最多再发 TG_PER_TICK 个 Telegram 请求：先发消息，剩下的额度再删到期的地图消息
+  ctx.cap = ctx.used + TG_PER_TICK;
+  if (sending) {
     const r = await step('flush', () => flush(ctx, OUTBOX_RESERVE));
     if (r?.sent) did.push(`sent(${r.sent})`);
+    if (r?.pending) did.push('pending');
+  }
+  if (expire.results.length && ctx.left() > 0) {
+    await step('expire', () => expireTick(ctx, expire.results));
+    did.push(`expire(${expire.results.length})`);
   }
 }
 

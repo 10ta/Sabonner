@@ -80,7 +80,8 @@ export function makeCtx(env) {
     env,
     tz: env.TZ || 'Asia/Shanghai',
     used: 0,
-    left() { return SUBREQ_MAX - ctx.used; },
+    cap: SUBREQ_MAX,   // 这一次调用最多用到第几个子请求（cron 发消息时会调低，见 engine.js 的 TG_PER_TICK）
+    left() { return Math.min(SUBREQ_MAX, ctx.cap) - ctx.used; },
     async fetch(url, init) {
       if (ctx.used >= SUBREQ_MAX) throw new Error('subrequest budget exhausted');
       ctx.used++;

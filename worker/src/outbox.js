@@ -107,7 +107,10 @@ export async function flush(ctx, reserve = 0) {
   let sent = 0;
 
   for (const row of rows) {
-    if (ctx.left() <= reserve + (row.kind === 'daily' ? 2 : 0)) break; // 日报要 3 个请求：发送、置顶、删旧消息
+    // 日报要 3 个请求（发送、置顶、删旧消息）；直播卡片首发、结束消息发出后要顺带删这场之前的消息，至少 2 个。
+    // 额度不够就整条留到下一次，免得发了却没删
+    const need = row.kind === 'daily' ? 3 : row.kind === 'live_open' || row.tag === 'end' ? 2 : 1;
+    if (ctx.left() - reserve < need) break;
     const key = `${row.match_id}:${row.chat_id}`;
     if (blocked.has(Number(row.chat_id))) { done.push(row.id); continue; }
     let res;
