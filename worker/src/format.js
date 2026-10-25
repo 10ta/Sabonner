@@ -117,13 +117,15 @@ export function preMsg(m, tz) {
 }
 
 // 直播中的可编辑消息；finished=true 时变成结束版
-export function liveCard(m, maps, finished = false) {
+// 卡片发出后都是原地编辑，Telegram 上显示的一直是第一次发出的时间（开赛时），看起来像是那时就有了后来的比分。
+// 所以末尾写上这次内容是几点更新的（只在比分 / 地图变化、卡片真的要编辑时才生成，不会因此多编辑）
+export function liveCard(m, maps, finished = false, tz = 'Asia/Shanghai') {
   return [
     finished ? `🏁 <b>已结束</b> · BO${m.bo}` : `🔴 <b>LIVE</b> · BO${m.bo}`,
     head(m),
     scoreBlock(m, null, finished ? 'verdict' : 'score'),
     mapsBlock(m, maps, finished), // 结束后不再列没打的图
-    links(m),
+    `${links(m)}  <i>· ${fmtClock(now(), tz)} 更新</i>`,
   ].filter(Boolean).join('\n');
 }
 

@@ -18,11 +18,14 @@ export async function markOnce(db, key) {
 }
 
 // 接收推送的人：owner + 已批准用户
-export async function recipients(env) {
-  const { results } = await env.DB.prepare("SELECT tg_id FROM users WHERE status = 'approved'").all();
+export const recipientsStmt = (db) => db.prepare("SELECT tg_id FROM users WHERE status = 'approved'");
+export function recipientsFrom(results, env) {
   const ids = new Set(results.map((r) => Number(r.tg_id)));
   if (env.OWNER_ID) ids.add(Number(env.OWNER_ID));
   return [...ids];
+}
+export async function recipients(env) {
+  return recipientsFrom((await recipientsStmt(env.DB).all()).results, env);
 }
 
 // ---------- 赛事列表 ----------

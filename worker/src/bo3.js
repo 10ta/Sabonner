@@ -35,9 +35,17 @@ export function ensureCountries(ctx) {
   return ctx.countriesP;
 }
 
+// 调用方已经把 kv 里的 countries 行和别的查询一起读出来了（少一次 D1 往返）：没过期就直接用
+export function primeCountries(ctx, row) {
+  let cached = null;
+  try { cached = row ? JSON.parse(row.v) : null; } catch { /* 坏缓存当没有 */ }
+  if (cached && cached.at > Date.now() / 1000 - COUNTRY_TTL) ctx.countriesP = Promise.resolve(cached.map);
+}
+export const countriesStmt = (db) => db.prepare("SELECT v FROM kv WHERE k = 'countries'");
+
 async function loadCountries(ctx) {
   const db = ctx.env.DB;
-  const row = await db.prepare("SELECT v FROM kv WHERE k = 'countries'").first();
+  const row = await countriesStmt(db).first();
   let cached = null;
   try { cached = row ? JSON.parse(row.v) : null; } catch { /* 坏缓存当没有 */ }
   if (cached && cached.at > Date.now() / 1000 - COUNTRY_TTL) return cached.map;
@@ -113,8 +121,10 @@ async function matches(ctx, url) {
 
 // 补上线下 / 线上、HLTV 赛事页、奖金（只在赛事接口里有，按赛事 id 查，缓存一天）。
 // 赛程刷新把几路请求合并之后调用一次；直播轮询不调用——这些字段库里已有，合并时沿用旧值
-export async function attachTournaments(ctx, list) {
-  const tours = await ensureTournaments(ctx, [...new Set(list.map((m) => m.tournament_id).filter(Boolean))]);
+// prefetched / defer：见 ensureTournaments
+export const tournamentIds = (list) => [...new Set(list.map((m) => Number(m.tournament_id)).filter(Number.isFinite))];
+export async function attachTournaments(ctx, list, prefetched = null, defer = null) {
+  const tours = await ensureTournaments(ctx, tournamentIds(list), prefetched, defer);
   for (const m of list) {
     const t = tours.get(m.tournament_id);
     m.event_type = t?.event_type || null;
@@ -152,21 +162,43 @@ export async function matchesByTeamSide(ctx, teamIds, side, limit = 30) {
   return matches(ctx, buildUrl('matches', [ACTIVE, [`matches.team${side}_id`, 'in', teamIds.join(',')]], { ...MATCH_EXTRA, 'page[limit]': limit }));
 }
 
-// 直播轮询用：连同每张图的数据一起取，省掉逐场查地图的请求
-export async function matchesByIds(ctx, ids) {
-  if (!ids.length) return [];
-  return matches(ctx, buildUrl('matches', [['matches.id', 'in', ids.join(',')]], { with: `${WITH},games`, 'page[limit]': Math.min(ids.length, 100) }));
+// 直播轮询、赛后数据用：只要比分、状态和每张图（with=games）。队伍、赛事、阶段、AI 预测这些库里都有，
+// 不再每 2 分钟连同它们一起下载解析（也用不着国家代码表）。olds：库里这几场比赛（已解析）
+export async function liveByIds(ctx, olds) {
+  if (!olds.length) return [];
+  const byId = new Map(olds.map((o) => [o.id, o]));
+  const raw = await get(ctx, buildUrl('matches', [['matches.id', 'in', olds.map((o) => o.id).join(',')]], { with: 'games', 'page[limit]': Math.min(olds.length, 100) }));
+  return raw.map((r) => {
+    const old = byId.get(r.id) || {};
+    const f = {
+      id: r.id,
+      team1_id: r.team1_id ?? old.team1_id ?? null,
+      team2_id: r.team2_id ?? old.team2_id ?? null,
+      status: r.status,
+      s1: r.team1_score ?? 0,
+      s2: r.team2_score ?? 0,
+      winner_id: r.winner_team_id ?? null,
+      parsed: r.parsed_status || null,
+    };
+    const start = ts(r.start_date);
+    if (start) f.start_ts = start;
+    if (Array.isArray(r.games)) f.maps = mapsFromGames(r.games, { ...old, ...f }); // 地图胜者对不上 id 时按库里的队名猜
+    return f;
+  });
 }
 
 // ---------- 赛事缓存 ----------
 
 const TOUR_TTL = 86400;
-export async function ensureTournaments(ctx, ids) {
+export const tournamentsStmt = (db, ids) => db.prepare(`SELECT * FROM tournaments WHERE id IN (${ids.map(Number).filter(Number.isFinite).join(',')})`);
+// prefetched：调用方已经读好的 tournaments 行（和别的查询拼在一个 batch 里）；
+// defer：传一个数组时，新赛事信息的写入语句放进去，由调用方和别的写入一起提交（少一次 D1 往返）
+export async function ensureTournaments(ctx, ids, prefetched = null, defer = null) {
   const out = new Map();
   if (!ids.length) return out;
   const db = ctx.env.DB;
   const nums = ids.map(Number).filter(Number.isFinite);
-  const { results } = await db.prepare(`SELECT * FROM tournaments WHERE id IN (${nums.join(',')})`).all();
+  const results = prefetched ?? (await tournamentsStmt(db, nums).all()).results;
   const fresh = Date.now() / 1000 - TOUR_TTL;
   for (const r of results) out.set(r.id, r);
   const missing = nums.filter((id) => !out.has(id) || out.get(id).updated_at < fresh);
@@ -182,7 +214,8 @@ export async function ensureTournaments(ctx, ids) {
         ON CONFLICT(id) DO UPDATE SET prize = excluded.prize, event_type = excluded.event_type, hltv_url = excluded.hltv_url, updated_at = excluded.updated_at`)
         .bind(row.id, row.prize, row.event_type, row.hltv_url, row.updated_at));
     }
-    if (stmts.length) await db.batch(stmts);
+    if (defer) defer.push(...stmts);
+    else if (stmts.length) await db.batch(stmts);
   } catch (e) {
     console.error('tournaments', e?.message || e); // 拿不到就先不显示线下 / 线上，下次再试
   }

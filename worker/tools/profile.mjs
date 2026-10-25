@@ -53,24 +53,31 @@ if (CHILD != null) {
   sql = new DatabaseSync(':memory:');
   for (const f of fs.readdirSync(path.join(ROOT, 'migrations')).sort()) sql.exec(fs.readFileSync(path.join(ROOT, 'migrations', f), 'utf8'));
 }
-let dbMs = 0;
+let dbMs = 0, dbCalls = 0, netCalls = 0;
 class Stmt {
   constructor(s) { this.s = s; this.a = []; }
   bind(...a) { this.a = a; return this; }
   _x() {
     const t = performance.now();
     try {
-      const st = sql.prepare(this.s);
-      const a = this.a.map((v) => (v === undefined ? null : typeof v === 'boolean' ? Number(v) : v));
-      if (/^\s*(SELECT|WITH)/i.test(this.s)) return { results: st.all(...a), meta: {} };
+      // Node 24 的 node:sqlite 不支持 ?1 ?2 这种带编号的参数（D1 支持，Sabonner 也在用）：换成按出现顺序的 ? 再排参数
+      let q = this.s, a = this.a;
+      if (/\?\d/.test(q)) {
+        const order = [];
+        q = q.replace(/\?(\d+)/g, (_, n) => { order.push(Number(n) - 1); return '?'; });
+        a = order.map((i) => a[i]);
+      }
+      const st = sql.prepare(q);
+      a = a.map((v) => (v === undefined ? null : typeof v === 'boolean' ? Number(v) : v));
+      if (/^\s*(SELECT|WITH)/i.test(q)) return { results: st.all(...a), meta: {} };
       return { results: [], meta: { changes: Number(st.run(...a).changes) } };
     } finally { dbMs += performance.now() - t; }
   }
-  async all() { return this._x(); }
-  async first() { return this._x().results[0] || null; }
-  async run() { return this._x(); }
+  async all() { dbCalls++; return this._x(); }
+  async first() { dbCalls++; return this._x().results[0] || null; }
+  async run() { dbCalls++; return this._x(); }
 }
-const DB = { prepare: (s) => new Stmt(s), batch: async (ss) => ss.map((s) => s._x()) };
+const DB = { prepare: (s) => new Stmt(s), batch: async (ss) => { dbCalls++; return ss.map((s) => s._x()); } };
 
 // ---------- 模拟时钟 ----------
 const realNow = Date.now.bind(Date);
@@ -82,6 +89,7 @@ const HTTP = path.join(FIX, 'http.json');
 const META = path.join(FIX, 'meta.json');
 const http = RECORD ? {} : JSON.parse(fs.readFileSync(HTTP, 'utf8'));
 let missing = 0, bytes = 0;
+const missingUrls = new Set();
 const fakeRes = (status, body) => ({
   ok: status >= 200 && status < 300, status,
   headers: new Headers({ 'content-type': 'application/json' }),
@@ -91,10 +99,11 @@ let tgId = 1000;
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (input) => {
   const url = String(input?.url ?? input);
+  netCalls++;
   if (url.includes('api.telegram.org')) return fakeRes(200, JSON.stringify({ ok: true, result: { message_id: ++tgId } })); // 不真发
   if (!RECORD) {
     const r = http[url];
-    if (!r) { missing++; return fakeRes(404, '{}'); }
+    if (!r) { missing++; missingUrls.add(url); return fakeRes(404, '{}'); }
     bytes += r.body.length;
     return fakeRes(r.status, r.body);
   }
@@ -138,13 +147,13 @@ async function cycle(only = null) {
   for (let i = 0; i < 20; i++) {
     if (only != null && i !== only) continue;
     clock = meta.start + i * 60000;
-    let line = '', errs = 0;
+    let line = '', errs = 0, errText = '';
     console.log = (...a) => { const s = a.join(' '); if (s.startsWith('[cron]')) line = s; };
-    console.error = () => { errs++; };
-    const d0 = dbMs, t0 = performance.now();
+    console.error = (...a) => { errs++; errText ||= a.map((x) => String(x?.stack || x)).join(' ').split('\n').slice(0, 3).join(' | '); };
+    const d0 = dbMs, t0 = performance.now(), c0 = dbCalls, n0 = netCalls;
     try { await runCron(makeCtx(env)); } finally { console.log = origLog; console.error = origErr; }
     const ms = performance.now() - t0 - (dbMs - d0);
-    rows.push({ minute: i, line: line.replace('[cron] ', ''), ms, db: dbMs - d0, errs });
+    rows.push({ minute: i, line: line.replace('[cron] ', ''), ms, db: dbMs - d0, errs, errText, d1: dbCalls - c0, net: netCalls - n0 });
   }
   return rows;
 }
@@ -155,7 +164,26 @@ if (CHILD != null) {   // 子进程：只跑这一分钟，把结果交给父进
   // 先让测量工具自己的部分（假响应、本地数据库）跑一遍，免得它们第一次初始化的开销算到 Worker 代码头上
   await fakeRes(200, '{"a":1}').json();
   await DB.prepare('SELECT 1').all();
+  let sess = null;
+  if (process.env.PROF_CHILD) {   // 内部用：只对这一分钟抓 CPU profile，打印最耗时的函数
+    const { Session } = await import('node:inspector/promises');
+    sess = new Session(); sess.connect();
+    await sess.post('Profiler.enable'); await sess.post('Profiler.setSamplingInterval', { interval: 20 }); await sess.post('Profiler.start');
+  }
   const [r] = await cycle(CHILD);
+  if (sess) {
+    const { profile: p } = await sess.post('Profiler.stop');
+    const by = new Map(p.nodes.map((n) => [n.id, n])), self = new Map();
+    let tot = 0;
+    p.samples.forEach((id, i) => {
+      const cf = by.get(id).callFrame;
+      const k = `${cf.functionName || '(匿名)'}  ${cf.url ? cf.url.split('/').slice(-2).join('/') : '(native)'}:${cf.lineNumber + 1}`;
+      if (/node:inspector|^\((idle|program)\)|tools\/profile\.mjs/.test(k) && !k.startsWith('json ')) return;
+      const dt = p.timeDeltas[i] || 0; self.set(k, (self.get(k) || 0) + dt); tot += dt;
+    });
+    console.log(`共 ${(tot / 1000).toFixed(2)}ms（Worker 代码 + 解析响应）`);
+    for (const [k, v] of [...self].sort((a, b) => b[1] - a[1]).slice(0, 12)) console.log(`${(v / tot * 100).toFixed(0).padStart(4)}%  ${(v / 1000).toFixed(2)}ms  ${k.startsWith('json ') ? 'JSON.parse（解析响应）' : k}`);
+  }
   process.stdout.write(`\n@@${JSON.stringify(r)}\n`);
   process.exit(0);
 }
@@ -190,11 +218,12 @@ const warm = [];
 for (let k = 0; k < 3; k++) warm.push(...await cycle());
 
 say('每一分钟（第 1 轮 = 冷启动，预热后 = 后 3 轮的中位数）');
-say(['分钟', '任务', '冷启动ms', '预热后ms', '数据库ms'].join('\t'));
+say(['分钟', '任务', '冷启动ms', '预热后ms', '数据库ms', 'D1往返', '外部请求'].join('\t'));
 for (let i = 0; i < 20; i++) {
   const w = warm.filter((r) => r.minute === i).map((r) => r.ms).sort((a, b) => a - b);
-  say([`:${String(i).padStart(2, '0')}`, cold[i].line.padEnd(34), f(cold[i].ms), f(w[1]), f(cold[i].db)].join('\t')
-    + (cold[i].errs ? `\t⚠️ ${cold[i].errs} 个错误` : ''));
+  const w2 = warm.find((r) => r.minute === i);
+  say([`:${String(i).padStart(2, '0')}`, cold[i].line.padEnd(34), f(cold[i].ms), f(w[1]), f(cold[i].db), w2.d1, w2.net].join('\t')
+    + (cold[i].errs ? `\t⚠️ ${cold[i].errs} 个错误：${cold[i].errText.slice(0, 160)}` : ''));
 }
 
 say('\n按任务汇总（预热后）');
@@ -222,7 +251,10 @@ for (const [u, r] of Object.entries(http).sort((a, b) => b[1].body.length - a[1]
   const short = u.replace('https://api.bo3.gg/api/v1/', 'bo3:').replace(/filter%5B|%5D|%5B/g, (m) => (m === 'filter%5B' ? '' : m === '%5D' ? ']' : '[')).slice(0, 110);
   say(`${(r.body.length / 1024).toFixed(0).padStart(5)} KB  ${short}`);
 }
-if (missing) say(`\n⚠️ 有 ${missing} 次请求在录制里没有（比赛状态变了），这几次按「没数据」处理`);
+if (missing) {
+  say(`\n⚠️ 有 ${missing} 次请求在录制里没有（比赛状态变了），这几次按「没数据」处理；网址见 tools/fixtures/missing.txt`);
+  fs.writeFileSync(path.join(FIX, 'missing.txt'), [...missingUrls].join('\n') + '\n');
+}
 
 if (session) {
   const { profile } = await session.post('Profiler.stop');

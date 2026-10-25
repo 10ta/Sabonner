@@ -12,8 +12,8 @@
 // 所有事件都先 claim 去重键，再入队，保证同一事件只推一次。
 
 import { now, SUBREQ_MAX } from './util.js';
-import { getSubs, getKV, setKVStmt, recipients, upsertMatchStmt, matchChanged, parseMatchRow, cleanup, KEEP_OLD, eventsStmts, pickEvents, subsStmts, subsFrom } from './db.js';
-import { matchesByTiers, matchesByTeams, matchesByTeamSide, matchesByStars, matchesByIds, attachTournaments, matchStats, eventList } from './bo3.js';
+import { getSubs, getKV, setKVStmt, recipients, recipientsStmt, recipientsFrom, upsertMatchStmt, matchChanged, parseMatchRow, cleanup, KEEP_OLD, eventsStmts, pickEvents, subsStmts, subsFrom } from './db.js';
+import { matchesByTiers, matchesByTeams, matchesByTeamSide, matchesByStars, liveByIds, attachTournaments, tournamentIds, tournamentsStmt, countriesStmt, primeCountries, matchStats, eventList } from './bo3.js';
 import { roomInfo } from './douyu.js';
 import { preMsg, liveCard, mapEndMsg, endMsg, streamerLiveMsg, dailyMsg } from './format.js';
 import { enqueue, fanout, flush } from './outbox.js';
@@ -30,6 +30,9 @@ export async function claim(db, keys) {
   const res = await db.batch(keys.map((k) => db.prepare('INSERT OR IGNORE INTO sent (key, at) VALUES (?, ?)').bind(k, t)));
   return new Set(keys.filter((_, i) => res[i].meta.changes > 0));
 }
+
+// 接收推送的人：轻活分钟已经和别的查询一起读好放在 ctx.to；其余情况再单独查一次
+const toOf = async (ctx) => (ctx.to ??= await recipients(ctx.env));
 
 async function step(name, fn) {
   try { return await fn(); } catch (e) { console.error(`[${name}]`, e?.stack || e); return null; }
@@ -74,15 +77,19 @@ async function lightTick(ctx, minute, t, did) {
   const db = ctx.env.DB;
   const dayStart = t - (t % 86400);
   const dailyKey = `daily:${new Date(dayStart * 1000).toISOString().slice(0, 10)}`;
-  // 一次往返读完这一分钟要用的全部状态（以前是 6、7 次 D1 往返）
-  const [live, remind, rooms, outbox, expire, daily] = await db.batch([
+  // 一次往返读完这一分钟要用的全部状态：直播要看的比赛和它们已经领过的去重键、提醒、斗鱼房间、发件队列、
+  // 到期要删的消息、今天的日报发过没有、接收人。比赛没变化时，整分钟只有这一次 D1 往返
+  const [live, claimed, remind, rooms, outbox, expire, daily, users] = await db.batch([
     liveRowsStmt(db, minute, t),
+    claimedKeysStmt(db, minute, t),
     remindRowsStmt(db, t),
     db.prepare('SELECT * FROM streamers ORDER BY room_id'),
     db.prepare('SELECT * FROM outbox ORDER BY id LIMIT ?').bind(SUBREQ_MAX),
     db.prepare("SELECT chat_id, message_id FROM tg_msgs WHERE tag = 'map' AND sent_at <= ?").bind(t - EXPIRE.map),
     db.prepare('SELECT 1 FROM sent WHERE key = ?').bind(dailyKey),
+    recipientsStmt(db),
   ]);
+  ctx.to = recipientsFrom(users.results, ctx.env);
 
   let queued = 0;
   // 日志：做了的步骤都记一笔，入队了消息的带上条数，如 live:2+3 = 轮询 2 场、入队 3 条
@@ -93,7 +100,9 @@ async function lightTick(ctx, minute, t, did) {
   };
   // 只在 UTC 0 点后的第一个小时内（正常是 00:01 那一次）
   if (t - dayStart <= 3600 && !daily.results.length) await run('daily', () => dailyTick(ctx, dayStart, dailyKey));
-  if (live.results.length) await run(`live:${live.results.length}`, () => liveTick(ctx, minute, live.results));
+  if (live.results.length) {
+    await run(`live:${live.results.length}`, () => liveTick(ctx, minute, live.results, new Set(claimed.results.map((r) => r.key))));
+  }
   if (remind.results.length) await run('remind', () => remindTick(ctx, remind.results));
   if (rooms.results.length) await run('douyu', () => douyuTick(ctx, minute, rooms.results));
   if (expire.results.length) {
@@ -142,16 +151,18 @@ function pick(list, t) {
 // 写入有变化的比赛（返回语句，调用方一起 batch）
 async function writeStmts(ctx, map, subs, byTeam) {
   const db = ctx.env.DB;
-  await attachTournaments(ctx, [...map.values()]); // 合并去重之后只查一次赛事信息
-
-  // 只写有变化的比赛：先把库里现有的这些行读出来对比（读的额度比写宽得多）
-  const existing = new Map();
+  const list = [...map.values()];
+  const tours = tournamentIds(list);
   const ids = [...map.keys()].map(Number).filter(Number.isFinite);
-  if (ids.length) {
-    const { results } = await db.prepare(`SELECT * FROM matches WHERE id IN (${ids.join(',')})`).all();
-    for (const r of results) existing.set(r.id, r);
-  }
-  const stmts = [];
+  // 赛事信息缓存和库里现有的这几场比赛一次读完（只写有变化的比赛：先读出来对比，读的额度比写宽得多）
+  const reads = await (tours.length || ids.length ? db.batch([
+    ...(tours.length ? [tournamentsStmt(db, tours)] : []),
+    ...(ids.length ? [db.prepare(`SELECT * FROM matches WHERE id IN (${ids.join(',')})`)] : []),
+  ]) : []);
+  const stmts = [];   // 新赛事信息的写入也放进来，和比赛一起提交
+  await attachTournaments(ctx, list, tours.length ? reads[0].results : [], stmts);
+  const existing = new Map();
+  if (ids.length) for (const r of reads[tours.length ? 1 : 0].results) existing.set(r.id, r);
   for (const m of map.values()) {
     const old = existing.get(m.id);
     if (m.status === 'current') { if (!old) stmts.push(upsertMatchStmt(db, m, true)); continue; }
@@ -199,8 +210,10 @@ export async function refreshSchedule(ctx) {
 export async function refreshStep(ctx, slot, last = false) {
   const db = ctx.env.DB;
   const t = now();
-  const res = await db.batch(subsStmts(db));
+  // 订阅、国家代码表、（一轮最后一格才要的）各部分记下的比赛 id，一次读完
+  const res = await db.batch([...subsStmts(db), countriesStmt(db), ...(last ? [db.prepare("SELECT k, v FROM kv WHERE k LIKE 'rf:%'")] : [])]);
   const subs = subsFrom(res);
+  primeCountries(ctx, res[3].results[0]); // 国家代码表和订阅一起读了，解析比赛时不用再查一次
   let part = slot;
   if (slot.startsWith('tier:')) {
     const tier = subs.tiers[Number(slot.slice(5))];
@@ -219,12 +232,10 @@ export async function refreshStep(ctx, slot, last = false) {
   }
   if (last) {
     // 当前订阅的每个部分都要有近 PART_FRESH 内的结果，才用它们的并集删比赛
-    const parts = partsOf(subs).filter((p) => p !== part);
-    const rows = parts.length
-      ? (await db.prepare(`SELECT k, v FROM kv WHERE k IN (${parts.map(() => '?').join(',')})`).bind(...parts.map((p) => `rf:${p}`)).all()).results
-      : [];
+    const parts = new Set(partsOf(subs).filter((p) => p !== part).map((p) => `rf:${p}`));
+    const rows = res[4].results.filter((r) => parts.has(r.k));
     const keep = new Set(own);
-    let fresh = rows.length === parts.length;
+    let fresh = rows.length === parts.size;
     for (const r of rows) {
       let v = null;
       try { v = JSON.parse(r.v); } catch { /* 当没有 */ }
@@ -254,7 +265,7 @@ export async function remindTick(ctx, results) {
   const got = await claim(db, plan.map((p) => p[0]));
   if (!got.size) return 0;
 
-  const to = await recipients(ctx.env);
+  const to = await toOf(ctx);
   const items = [];
   for (const [key, m] of plan) if (got.has(key)) items.push(...fanout(to, 'send', preMsg(m, ctx.tz), m.id, 'pre'));
   await enqueue(db, items);
@@ -289,7 +300,7 @@ export async function dailyTick(ctx, dayStart, key) {
   const text = await buildDaily(ctx, dayStart);
   const got = await claim(ctx.env.DB, [key]);
   if (!got.size) return 0;
-  const to = await recipients(ctx.env);
+  const to = await toOf(ctx);
   await enqueue(ctx.env.DB, to.map((chat_id) => ({ chat_id, kind: 'daily', text, meta: day })));
   return to.length;
 }
@@ -311,10 +322,21 @@ export function seriesDecided(m) {
 // 直播轮询要看的比赛：进行中，或 30 分钟内开赛（提前开赛也能及时发现）。
 // 开赛 6 小时后 bo3 还标着「未开始」的比赛（多半是取消了没更新）每 10 分钟才带上一次，
 // 免得一场「僵尸比赛」让直播轮询每次都去请求 bo3
-function liveRowsStmt(db, minute, t) {
+function liveWhere(minute, t) {
   const all = minute % 10 === 5;
-  return db.prepare(`SELECT * FROM matches WHERE status = 'current'
-    OR (status = 'upcoming' AND start_ts <= ?${all ? '' : ' AND start_ts > ?'})`).bind(...(all ? [t + 1800] : [t + 1800, t - STALE_UPCOMING]));
+  return [`(status = 'current' OR (status = 'upcoming' AND start_ts <= ?${all ? '' : ' AND start_ts > ?'}))`,
+    all ? [t + 1800] : [t + 1800, t - STALE_UPCOMING]];
+}
+function liveRowsStmt(db, minute, t) {
+  const [where, args] = liveWhere(minute, t);
+  return db.prepare(`SELECT * FROM matches WHERE ${where}`).bind(...args);
+}
+// 这些比赛已经领过的去重键（open / end / map:<id>:<n>）。直播轮询只领还没领过的，
+// 比分没变的时候就不用再为领键多跑一次 D1（map 键用区间比较，走 sent 的主键索引）
+function claimedKeysStmt(db, minute, t) {
+  const [where, args] = liveWhere(minute, t);
+  return db.prepare(`SELECT s.key FROM sent s JOIN (SELECT id FROM matches WHERE ${where}) m
+    ON s.key = 'open:' || m.id OR s.key = 'end:' || m.id OR (s.key > 'map:' || m.id || ':' AND s.key < 'map:' || m.id || ';')`).bind(...args);
 }
 
 // 比赛已结束但最后一张图比分迟迟不来时，最多等这么久再发结束消息
@@ -328,14 +350,15 @@ async function waitedTooLong(db, id, t) {
   return !r || t - r.at >= MAP_WAIT;
 }
 
-// results：liveRowsStmt 查出来的比赛（按 id 一次向 bo3 查完，不多花请求）
-export async function liveTick(ctx, minute, results) {
+// results：liveRowsStmt 查出来的比赛（按 id 一次向 bo3 查完，不多花请求）；
+// claimed：这些比赛已经领过的去重键（lightTick 一起查好），不传就全部重新领
+export async function liveTick(ctx, minute, results, claimed = null) {
   const db = ctx.env.DB;
   const t = now();
   if (!results.length) return 0;
 
   const olds = results.map(parseMatchRow);
-  const fresh = new Map((await matchesByIds(ctx, olds.map((m) => m.id))).map((m) => [m.id, m]));
+  const fresh = new Map((await liveByIds(ctx, olds)).map((m) => [m.id, m]));
   const stmts = [];
 
   // 第一遍：算出每场的新状态和要领取的去重键
@@ -377,9 +400,9 @@ export async function liveTick(ctx, minute, results) {
     plans.push({ old, m, live, done, finishedMaps, keys });
   }
 
-  // 所有比赛的去重键一次领完（以前每场两次 D1 往返）
-  const got = await claim(db, plans.flatMap((p) => p.keys));
-  const to = plans.length ? await recipients(ctx.env) : [];
+  // 所有比赛还没领过的去重键一次领完；都领过了（比分没变）就不跑这一次 D1
+  const got = await claim(db, plans.flatMap((p) => p.keys).filter((k) => !claimed?.has(k)));
+  const to = plans.length ? await toOf(ctx) : [];
   const items = [];
 
   // 第二遍：按领到的键生成消息
@@ -391,9 +414,9 @@ export async function liveTick(ctx, minute, results) {
       for (const g of finishedMaps) if (got.has(`map:${m.id}:${g.n}`)) items.push(...fanout(to, 'send', mapEndMsg(m, g, m.maps), m.id, 'map'));
     }
     const changed = m.s1 !== old.s1 || m.s2 !== old.s2 || JSON.stringify(m.maps) !== JSON.stringify(old.maps) || old.status !== m.status;
-    if (opening) items.push(...fanout(to, 'live_open', liveCard(m, m.maps), m.id));
+    if (opening) items.push(...fanout(to, 'live_open', liveCard(m, m.maps, false, ctx.tz), m.id));
     // 结束时直播卡片会被删掉（结束消息里有全部信息），不用再编辑
-    else if (changed && !ending) items.push(...fanout(to, 'live_edit', liveCard(m, m.maps, done), m.id));
+    else if (changed && !ending) items.push(...fanout(to, 'live_edit', liveCard(m, m.maps, done, ctx.tz), m.id));
     if (ending) items.push(...fanout(to, 'send', endMsg(m), m.id, 'end'));
     if (matchChanged(old, m)) stmts.push(upsertMatchStmt(db, m));
   }
@@ -419,7 +442,7 @@ export async function statsTick(ctx) {
   if (!results.length) return 0;
 
   const olds = results.map(parseMatchRow);
-  const fresh = new Map((await matchesByIds(ctx, olds.map((m) => m.id))).map((m) => [m.id, m]));
+  const fresh = new Map((await liveByIds(ctx, olds)).map((m) => [m.id, m]));
   const stmts = [];
   const items = [];
   let fetched = 0;
@@ -433,7 +456,7 @@ export async function statsTick(ctx) {
         const maps = (f.maps || []).filter((g) => g.sc1 != null).length >= (old.maps || []).filter((g) => g.sc1 != null).length ? f.maps : old.maps;
         const m = { ...old, maps, stats };
         stmts.push(db.prepare('UPDATE matches SET stats = ?, maps = ? WHERE id = ?').bind(JSON.stringify(stats), JSON.stringify(maps || []), old.id));
-        to ??= await recipients(ctx.env);
+        to ??= await toOf(ctx);
         items.push(...fanout(to, 'end_edit', endMsg(m), m.id));
         continue;
       }
@@ -523,7 +546,7 @@ export async function douyuTick(ctx, minute, all) {
 
   if (stmts.length) await db.batch(stmts);
   if (!went.length) return 0;
-  const to = await recipients(ctx.env);
+  const to = await toOf(ctx);
   const items = went.flatMap((s) => fanout(to, 'send', streamerLiveMsg(s)));
   await enqueue(db, items);
   return items.length;
