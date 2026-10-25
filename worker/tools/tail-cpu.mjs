@@ -1,0 +1,96 @@
+#!/usr/bin/env node
+// 统计线上每种任务的 CPU 时间：读 `wrangler tail --format json` 的输出，
+// 每次调用的 CPU 时间和这次调用里打的 [cron] 日志（或网页请求的路径）对上，按任务分组。
+//
+// 用法（在 worker/ 目录）：
+//   npx wrangler tail sabonner --format json > tail.json     # 至少录 25 分钟（cron 一轮 20 分钟），Ctrl+C 结束
+//   node tools/tail-cpu.mjs tail.json
+//
+// 输出每种任务的次数、CPU 中位数 / P90 / 最大值，和超过 10ms 的次数。
+// 录下来的内容只有本 Worker 的日志和请求路径，不含 secret；可以把输出直接贴回来。
+
+import fs from 'node:fs';
+
+const file = process.argv[2];
+if (!file) {
+  console.error('用法：node tools/tail-cpu.mjs tail.json');
+  process.exit(1);
+}
+const LIMIT = Number(process.env.CPU_LIMIT_MS || 10);
+
+// wrangler 输出的是一个接一个的 JSON 对象（可能跨多行），按括号配对切开
+function* objects(text) {
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === '{') { if (depth++ === 0) start = i; }
+    else if (c === '}' && depth > 0 && --depth === 0) {
+      try { yield JSON.parse(text.slice(start, i + 1)); } catch { /* 不完整的一段（比如 Ctrl+C 时截断）跳过 */ }
+    }
+  }
+}
+
+// 不同版本的字段名可能不同，都试一下
+const cpuOf = (e) => e.cpuTime ?? e.cpuTimeMs ?? e.cpu_time ?? e.CPUTimeMs ?? null;
+const wallOf = (e) => e.wallTime ?? e.wallTimeMs ?? e.wall_time ?? null;
+
+// 任务名：[cron] 那行去掉数字，如 "[cron] live:2+3 douyu" → "live douyu"，"refresh:tier:a(41)" → "refresh:tier:a"
+function jobOf(e) {
+  const lines = (e.logs || []).map((l) => (Array.isArray(l.message) ? l.message.join(' ') : String(l.message ?? '')));
+  const cron = lines.find((m) => m.startsWith('[cron]'));
+  if (cron) {
+    return cron.slice(7).split(' ').map((w) => w.replace(/\(.*\)$/, '').replace(/[:+]\d+/g, '')).sort().join(' ') || 'idle';
+  }
+  const req = e.event?.request;
+  if (req?.url) {
+    const u = new URL(req.url);
+    return `${req.method || 'GET'} ${u.pathname}`;
+  }
+  if (e.event?.cron) return 'cron（没有 [cron] 日志：旧版本或中途出错）';
+  return '其他';
+}
+
+const pct = (arr, p) => {
+  if (!arr.length) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.floor(p * s.length))];
+};
+const f = (v) => (v == null ? '–' : v.toFixed(1));
+
+const groups = new Map();
+let total = 0, noCpu = 0, sample = null;
+for (const e of objects(fs.readFileSync(file, 'utf8'))) {
+  if (!e || typeof e !== 'object' || !('outcome' in e || 'event' in e || 'logs' in e)) continue;
+  total++;
+  const cpu = cpuOf(e);
+  if (cpu == null) { noCpu++; sample ??= e; continue; }
+  const job = jobOf(e);
+  if (!groups.has(job)) groups.set(job, { cpu: [], wall: [], bad: 0 });
+  const g = groups.get(job);
+  g.cpu.push(Number(cpu));
+  const w = wallOf(e);
+  if (w != null) g.wall.push(Number(w));
+  if (e.outcome && e.outcome !== 'ok') g.bad++;
+}
+
+console.log(`共 ${total} 次调用${noCpu ? `，其中 ${noCpu} 次没有 CPU 时间字段` : ''}`);
+if (noCpu === total) {
+  console.log('这份 tail 输出里没有每次调用的 CPU 时间。顶层字段有：', Object.keys(sample || {}).join(', '));
+  console.log('请改用本地测量：node tools/profile.mjs record <网址> && node tools/profile.mjs');
+  process.exit(2);
+}
+const rows = [...groups.entries()].sort((a, b) => pct(b[1].cpu, 0.9) - pct(a[1].cpu, 0.9));
+const all = rows.flatMap(([, g]) => g.cpu);
+console.log(`全部：P50 ${f(pct(all, 0.5))}ms  P90 ${f(pct(all, 0.9))}ms  最大 ${f(Math.max(...all))}ms  超过 ${LIMIT}ms 的 ${all.filter((v) => v > LIMIT).length} 次\n`);
+console.log(['任务'.padEnd(28), '次数', 'CPU中位', 'CPU P90', 'CPU最大', `>${LIMIT}ms`, '墙钟中位', '非ok'].join('\t'));
+for (const [job, g] of rows) {
+  console.log([job.padEnd(28), g.cpu.length, f(pct(g.cpu, 0.5)), f(pct(g.cpu, 0.9)), f(Math.max(...g.cpu)),
+    g.cpu.filter((v) => v > LIMIT).length, f(pct(g.wall, 0.5)), g.bad].join('\t'));
+}

@@ -274,6 +274,30 @@ cron 每分钟一次。免费版**每次调用最多 10ms CPU**（偶尔超出�
 **存储上限**：比赛数据在 D1 里只保留开赛后 7 天，另外最多 3000 行（超出时删最旧的）；推送去重记录 30 天，发件队列 6 小时，赛事缓存 30 天，已发消息记录 48 小时（用于自动删除）。清理每小时跑一次，数据库通常只有几百 KB。
 
 **D1 用量**：D1 是 Cloudflare 的数据库（SQLite），免费额度每天读 500 万行、写 10 万行、存储 5GB，**整个 Cloudflare 账户共享**；超出后当天查询报错，次日恢复，不会扣费。比赛数据只在有变化时才写，订阅 S tier + 几支队伍时写入通常每天几千行。用量在控制台 Storage & Databases → D1 → sabonner → Metrics 查看。
+## 排查 CPU
+
+Worker 里拿不到自己用了多少 CPU（执行代码时计时器不走），控制台只有整体的 P50 / P90 / P99。想知道是哪种任务、哪段代码在耗 CPU，用 `worker/tools/` 下的两个工具（只在本地跑，不部署）：
+
+**线上：每种任务的真实 CPU。** 录 25 分钟以上（cron 一轮 20 分钟），按 `[cron]` 日志把每次调用的 CPU 时间归到任务上：
+
+```bash
+cd worker
+npx wrangler tail sabonner --format json > tail.json   # 25 分钟后 Ctrl+C
+node tools/tail-cpu.mjs tail.json
+```
+
+如果提示 tail 输出里没有 CPU 时间字段，就用下面的本地测量。
+
+**本地：每种任务、每个函数的耗时。** 先读线上的公开接口拿到当前订阅，用真实网络按 cron 的节奏模拟一轮，把 bo3 / 斗鱼的响应存到 `tools/fixtures/`；之后不用网络，反复重放同样的数据来测（需要 Node 22.5+，版本不够就把 `node` 换成 `npx -y node@22`）：
+
+```bash
+cd worker
+node tools/profile.mjs record https://sabonner.<你的子域>.workers.dev
+node tools/profile.mjs --prof --cold
+```
+
+输出（同时存到 `tools/fixtures/report.txt`）：每一分钟做了什么、各花多少毫秒（冷启动 / 预热后），按任务汇总，`/api/overview` 的耗时，每个外部响应有多大，最耗时的函数（`--prof`），以及每种任务在全新进程里第一次跑的耗时（`--cold`，相当于线上实例刚启动）。本地机器和 Cloudflare 的绝对值不同，看各任务之间的比例。Telegram 不会真发；fixtures 里只有 bo3 / 斗鱼的公开数据和公开接口返回的订阅。
+
 ## 已知限制
 
 - 有人拉黑或注销 Telegram 后，第一次推送失败就会被自动移出接收名单（等同 /stop），之后不再浪费请求；对方重新 /start 可以再申请。
