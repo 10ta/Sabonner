@@ -205,7 +205,15 @@ async function writeStmts(ctx, map, subs, byTeam) {
   if (ids.length) for (const r of reads[tours.length ? 1 : 0].results) existing.set(r.id, r);
   for (const m of map.values()) {
     const old = existing.get(m.id);
-    if (m.status === 'current') { if (!old) stmts.push(upsertMatchStmt(db, m, true)); continue; }
+    if (m.status === 'current') {
+      if (!old) stmts.push(upsertMatchStmt(db, m, true));
+      // 库里还是「未开始」，bo3 已经在打了（bo3 把开赛时间改早了，比如开打时改成实际开始时间，直播轮询按旧时间还没轮到）：
+      // 只改状态和开赛时间，交给直播轮询接手，比分仍由它去对比、发卡片
+      else if (old.status === 'upcoming') {
+        stmts.push(db.prepare("UPDATE matches SET status = 'current', start_ts = ? WHERE id = ? AND status = 'upcoming'").bind(m.start_ts, m.id));
+      }
+      continue;
+    }
     if (matchChanged(old, m)) stmts.push(upsertMatchStmt(db, m));
   }
   // 旧版订阅的队伍没有国旗 / 队徽，从比赛数据里补上
@@ -365,10 +373,13 @@ export function seriesDecided(m) {
 // 所以到点才开始问 bo3，确认开打了才发直播卡片，不会在推迟的时候先发一张空的 LIVE）。
 // 开赛 6 小时后 bo3 还标着「未开始」的比赛（多半是取消了没更新）每 10 分钟才带上一次，
 // 免得一场「僵尸比赛」让直播轮询每次都去请求 bo3
+// 另外每 10 分钟把 3 小时内要开的也带上问一次：bo3 偶尔会把开赛时间改早（实测有开打时才把时间改成实际开始时间的），
+// 只按库里的旧时间等，会一直等到旧时间才发现已经开打了
+const EARLY = 3 * 3600;
 function liveWhere(minute, t) {
   const all = minute % 10 === 5;
   return [`(status = 'current' OR (status = 'upcoming' AND start_ts <= ?${all ? '' : ' AND start_ts > ?'}))`,
-    all ? [t] : [t, t - STALE_UPCOMING]];
+    all ? [t + EARLY] : [t, t - STALE_UPCOMING]];
 }
 function liveRowsStmt(db, minute, t) {
   const [where, args] = liveWhere(minute, t);

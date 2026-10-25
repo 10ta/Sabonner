@@ -182,6 +182,8 @@ export async function liveByIds(ctx, olds) {
     };
     const start = ts(r.start_date);
     if (start) f.start_ts = start;
+    // bo3 网页上偶尔比赛还标着「即将开始」，第一张图却已经在打：有图开打或打完了就当作进行中
+    if (f.status === 'upcoming' && (r.games || []).some((g) => g.status === 'current' || g.status === 'finished')) f.status = 'current';
     if (Array.isArray(r.games)) {
       f.maps = mapsFromGames(r.games, { ...old, ...f }); // 地图胜者对不上 id 时按库里的队名猜
       // 记下每张图第一次看到「进行中」的时间（直播轮询据此在一张图打到一半时少问几次）
