@@ -109,9 +109,9 @@ async function lightTick(ctx, minute, t, did) {
     await step('expire', () => expireTick(ctx, expire.results));
     did.push(`expire(${expire.results.length})`);
   }
-  // 这一次新入队了消息就重新读队列；否则用上面读到的（通常是空的，直接跳过）
+  // 这一次新入队了消息，或者队列里还有上次没发完的，才去发（队列空着就跳过，不多一次 D1）
   if (queued || outbox.results.length) {
-    const r = await step('flush', () => flush(ctx, OUTBOX_RESERVE, queued ? null : outbox.results));
+    const r = await step('flush', () => flush(ctx, OUTBOX_RESERVE));
     if (r?.sent) did.push(`sent(${r.sent})`);
   }
 }
@@ -421,8 +421,7 @@ export async function liveTick(ctx, minute, results, claimed = null) {
     if (matchChanged(old, m)) stmts.push(upsertMatchStmt(db, m));
   }
 
-  if (stmts.length) await db.batch(stmts);
-  await enqueue(db, items);
+  await enqueue(db, items, stmts); // 比赛状态和消息一次提交
   return items.length;
 }
 
@@ -463,8 +462,7 @@ export async function statsTick(ctx) {
     }
     if (old.start_ts < t - STATS_GIVEUP) stmts.push(db.prepare("UPDATE matches SET stats = '[]' WHERE id = ?").bind(old.id));
   }
-  if (stmts.length) await db.batch(stmts);
-  await enqueue(db, items);
+  await enqueue(db, items, stmts);
   return fetched;
 }
 
@@ -544,10 +542,8 @@ export async function douyuTick(ctx, minute, all) {
     }
   });
 
-  if (stmts.length) await db.batch(stmts);
-  if (!went.length) return 0;
-  const to = await toOf(ctx);
+  const to = went.length ? await toOf(ctx) : [];
   const items = went.flatMap((s) => fanout(to, 'send', streamerLiveMsg(s)));
-  await enqueue(db, items);
+  await enqueue(db, items, stmts); // 房间状态和开播提醒一次提交
   return items.length;
 }

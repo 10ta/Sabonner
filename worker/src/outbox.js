@@ -15,10 +15,11 @@
 import { now } from './util.js';
 import { sendMessage, editMessage, tg } from './tgapi.js';
 
-export async function enqueue(db, items) {
-  if (!items.length) return;
+// extra：调用方别的写入（如比赛状态），和入队放在同一个 batch 里提交，少一次 D1 往返
+export async function enqueue(db, items, extra = []) {
+  if (!items.length) { if (extra.length) await db.batch(extra); return; }
   const t = now();
-  const stmts = [];
+  const stmts = [...extra];
   for (const it of items) {
     if (it.kind === 'live_edit') {
       stmts.push(db.prepare("DELETE FROM outbox WHERE kind = 'live_edit' AND match_id = ? AND chat_id = ?").bind(it.match_id, it.chat_id));
@@ -70,52 +71,32 @@ class Book {
     return out;
   }
 }
-const isTrigger = (r) => r.kind === 'live_open' || r.kind === 'daily' || r.tag === 'end';
 
-// prefetched：调用方已经读好的队列（cron 的轻活分钟一次 batch 读好），省一次 D1 往返；不传就自己读
-export async function flush(ctx, reserve = 0, prefetched = null) {
+// 发件前要读的东西（队列、要编辑的卡片和结束消息的 message_id、置顶记录、会触发自动删除的聊天的发送记录、
+// 还在进行 / 未开始的比赛）一次 batch 读完。按队列内容用子查询筛，队列里没有对应的消息时这些查询都是空的
+const TRIGGER = "(kind IN ('live_open', 'daily') OR tag = 'end')";
+export async function flush(ctx, reserve = 0) {
   const db = ctx.env.DB;
   const budget = ctx.left() - reserve;
   if (budget <= 0) return { sent: 0, pending: true };
 
-  const rows = prefetched
-    ? prefetched.slice(0, budget)
-    : (await db.prepare('SELECT * FROM outbox ORDER BY id LIMIT ?').bind(budget).all()).results;
+  const [out, live, pinRows, ends, msgs, act] = await db.batch([
+    db.prepare('SELECT * FROM outbox ORDER BY id LIMIT ?').bind(budget),
+    db.prepare("SELECT * FROM live_msgs WHERE match_id IN (SELECT match_id FROM outbox WHERE kind = 'live_edit')"),
+    db.prepare("SELECT * FROM pins WHERE EXISTS (SELECT 1 FROM outbox WHERE kind = 'daily')"),
+    db.prepare("SELECT chat_id, message_id, match_id FROM tg_msgs WHERE tag = 'end' AND match_id IN (SELECT match_id FROM outbox WHERE kind = 'end_edit')"),
+    db.prepare(`SELECT * FROM tg_msgs WHERE chat_id IN (SELECT chat_id FROM outbox WHERE ${TRIGGER})`),
+    db.prepare(`SELECT id FROM matches WHERE status IN ('current', 'upcoming') AND EXISTS (SELECT 1 FROM outbox WHERE ${TRIGGER})`),
+  ]);
+  const rows = out.results;
   if (!rows.length) return { sent: 0, pending: false };
 
-  // 需要的可编辑消息 id
-  const editIds = [...new Set(rows.filter((r) => r.kind === 'live_edit').map((r) => r.match_id))];
-  const msgMap = new Map();
-  if (editIds.length) {
-    const { results } = await db.prepare(`SELECT * FROM live_msgs WHERE match_id IN (${editIds.map(() => '?').join(',')})`).bind(...editIds).all();
-    for (const r of results) msgMap.set(`${r.match_id}:${r.chat_id}`, r.message_id);
-  }
-
-  const pins = new Map();
-  if (rows.some((r) => r.kind === 'daily')) {
-    const { results } = await db.prepare('SELECT * FROM pins').all();
-    for (const p of results) pins.set(p.chat_id, p);
-  }
-
-  // 结束消息的 message_id（编辑加记分板用）
-  const endIds = new Map();
-  const editMatches = [...new Set(rows.filter((r) => r.kind === 'end_edit').map((r) => Number(r.match_id)))];
-  if (editMatches.length) {
-    const { results } = await db.prepare(`SELECT chat_id, message_id, match_id FROM tg_msgs WHERE tag = 'end' AND match_id IN (${editMatches.join(',')})`).all();
-    for (const r of results) endIds.set(`${r.match_id}:${r.chat_id}`, r.message_id);
-  }
-
-  // 会触发删除的消息：先把相关聊天的发送记录读出来
-  const trig = rows.filter(isTrigger);
-  let book = new Book([], new Set());
-  if (trig.length) {
-    const chats = [...new Set(trig.map((r) => Number(r.chat_id)))];
-    const [msgs, act] = await db.batch([
-      db.prepare(`SELECT * FROM tg_msgs WHERE chat_id IN (${chats.join(',')})`),
-      db.prepare("SELECT id FROM matches WHERE status IN ('current', 'upcoming')"),
-    ]);
-    book = new Book(msgs.results, new Set(act.results.map((r) => r.id)));
-  }
+  // 可编辑的直播卡片、置顶、结束消息（编辑加记分板用）的 message_id
+  const msgMap = new Map(live.results.map((r) => [`${r.match_id}:${r.chat_id}`, r.message_id]));
+  const pins = new Map(pinRows.results.map((p) => [p.chat_id, p]));
+  const endIds = new Map(ends.results.map((r) => [`${r.match_id}:${r.chat_id}`, r.message_id]));
+  // 会触发删除的消息（直播卡片首发、日报、结束消息）：相关聊天的发送记录
+  const book = new Book(msgs.results, new Set(act.results.map((r) => r.id)));
 
   const done = [];
   const retry = [];
