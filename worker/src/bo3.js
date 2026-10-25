@@ -182,7 +182,13 @@ export async function liveByIds(ctx, olds) {
     };
     const start = ts(r.start_date);
     if (start) f.start_ts = start;
-    if (Array.isArray(r.games)) f.maps = mapsFromGames(r.games, { ...old, ...f }); // 地图胜者对不上 id 时按库里的队名猜
+    if (Array.isArray(r.games)) {
+      f.maps = mapsFromGames(r.games, { ...old, ...f }); // 地图胜者对不上 id 时按库里的队名猜
+      // 记下每张图第一次看到「进行中」的时间（直播轮询据此在一张图打到一半时少问几次）
+      const prev = new Map((old.maps || []).map((g) => [g.n, g]));
+      const t = Math.floor(Date.now() / 1000);
+      for (const g of f.maps) if (g.status === 'current') g.t = prev.get(g.n)?.t ?? t;
+    }
     return f;
   });
 }

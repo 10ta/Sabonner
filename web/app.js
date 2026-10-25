@@ -458,7 +458,7 @@
       <h3 class="dt-h">记分板</h3>
       ${m.stats && m.stats.length
         ? `<div class="sbs">${scoreTable(m, 1)}${scoreTable(m, 2)}</div><p class="dt-note">整场数据；ADR 为整场平均每回合伤害。</p>`
-        : `<p class="dt-empty">${m.stats ? 'bo3 没有这场的选手数据' : '选手数据还在生成中：bo3 赛后解析完 demo（通常几小时，慢的要一天多）后，这里和 TG 结束消息会自动补上'}</p>`}
+        : `<p class="dt-empty">${m.stats ? 'bo3 没有这场的选手数据' : '选手数据还在生成中：bo3 赛后解析完 demo（通常一到几小时）后，这里和 TG 结束消息会自动补上；赛后 8 小时还没有就不再等'}</p>`}
       <a class="btn dt-link" href="${esc(m.url)}" target="_blank" rel="noopener">在 bo3.gg 查看 ↗</a>`;
     fixLogos($('#detail-body'));
     const dlg = $('#detail');
