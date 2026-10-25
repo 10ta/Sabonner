@@ -153,7 +153,7 @@ async function cycle(only = null) {
     const d0 = dbMs, t0 = performance.now(), c0 = dbCalls, n0 = netCalls;
     try { await runCron(makeCtx(env)); } finally { console.log = origLog; console.error = origErr; }
     const ms = performance.now() - t0 - (dbMs - d0);
-    rows.push({ minute: i, line: line.replace('[cron] ', ''), ms, db: dbMs - d0, errs, errText, d1: dbCalls - c0, net: netCalls - n0 });
+    rows.push({ minute: i, line: line.replace('[cron] ', '').split(' | ')[0], ms, db: dbMs - d0, errs, errText, d1: dbCalls - c0, net: netCalls - n0 });
   }
   return rows;
 }

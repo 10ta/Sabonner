@@ -7,16 +7,17 @@
 //   奇数分钟（轻活，每 2 分钟一次；斗鱼每 10 分钟一次）：一次 D1 batch 读完要用的状态，没事做的步骤直接跳过
 //     每日预报（UTC 0 点后）、直播轮询（有比赛进行或已到开赛时间）、赛前 30 分钟提醒、斗鱼开播检查、
 //     地图消息到期删除、发件队列
-// 每次调用写一行「[cron] 做了什么」，Observability 里按这行分组就能看到每种任务各花多少 CPU
+// 每次调用写一行「[cron] 做了什么 | 各有几次往返」，如「[cron] live:1 sent(2) | d1=2 bo3=1 tg=2」。
+// 线上每次 D1 往返、每个外部请求各约 2ms CPU，所以往返次数基本决定了这一分钟的 CPU 时间（tools/tail-cpu.mjs 按这行分组统计）
 //
 // 所有事件都先 claim 去重键，再入队，保证同一事件只推一次。
 
-import { now, SUBREQ_MAX } from './util.js';
+import { now, SUBREQ_MAX, countD1, tripsText } from './util.js';
 import { getSubs, getKV, setKVStmt, recipients, recipientsStmt, recipientsFrom, upsertMatchStmt, matchChanged, parseMatchRow, cleanup, KEEP_OLD, eventsStmts, pickEvents, subsStmts, subsFrom } from './db.js';
 import { matchesByTiers, matchesByTeams, matchesByTeamSide, matchesByStars, liveByIds, attachTournaments, tournamentIds, tournamentsStmt, countriesStmt, primeCountries, matchStats, eventList } from './bo3.js';
 import { roomInfo } from './douyu.js';
 import { preMsg, liveCard, mapEndMsg, endMsg, streamerLiveMsg, dailyMsg } from './format.js';
-import { enqueue, fanout, flush } from './outbox.js';
+import { enqueue, fanout, flush, flushReads, needOf } from './outbox.js';
 import { tg } from './tgapi.js';
 
 const WINDOW = 7 * 86400;        // 只跟踪 7 天内的比赛
@@ -42,9 +43,10 @@ export async function runCron(ctx) {
   const t = now();
   const minute = Math.floor(t / 60);
   const did = [];
+  countD1(ctx);
   if (minute % 2 === 0) await heavyTick(ctx, minute, did);
   else await lightTick(ctx, minute, t, did);
-  console.log(`[cron] ${did.join(' ') || 'idle'}`);
+  console.log(`[cron] ${did.join(' ') || 'idle'} | ${tripsText(ctx)}`);
 }
 
 // ---------- 偶数分钟：一件重活 ----------
@@ -71,29 +73,34 @@ async function heavyTick(ctx, minute, did) {
 // ---------- 奇数分钟：轻活 ----------
 
 const STALE_UPCOMING = 6 * 3600;   // 见 liveRowsStmt
-// 轻活分钟最多发几个外部请求（bo3、斗鱼、Telegram 的发送 / 编辑 / 置顶 / 删除都算）。线上每个外部请求约 2–3ms CPU，
-// 一次发太多会超过免费版每次 10ms 的上限；Telegram 消息发不完的留在队列里，下一次（2 分钟后）接着发
-const FETCH_PER_TICK = 4;
-// 斗鱼多久查一次：这个接口分不出直播和录播（放录播时也是 isLive=1），查得勤也没用；开播提醒最多晚 10 分钟
+// 轻活分钟最多几次往返（D1 往返 + 外部请求：bo3、斗鱼、Telegram 的发送 / 编辑 / 置顶 / 删除都算）。
+// 线上实测每次约 2ms CPU（比分没变的直播轮询 2 次往返 ≈ 4ms，入队又发件的一分钟 9 次往返 ≈ 18ms），
+// 5 次 ≈ 10ms，是免费版每次调用的上限；Telegram 消息发不完的留在队列里，下一次（2 分钟后）接着发
+const TRIPS = 5;
+// 斗鱼多久查一遍：这个接口分不出直播和录播（放录播时也是 isLive=1），查得勤也没用；开播提醒最多晚 10 分钟。
+// 房间分散到这 10 分钟里的 5 次轻活，每次查 1/5（房间不多于 5 个时每次最多 1 个请求），不在同一分钟扎堆
 const DOUYU_EVERY = 10;
+const DOUYU_SLOTS = DOUYU_EVERY / 2;
 const EXPIRE = { map: 5 * 60 };    // 见 expireTick
 
 async function lightTick(ctx, minute, t, did) {
   const db = ctx.env.DB;
   const dayStart = t - (t % 86400);
   const dailyKey = `daily:${new Date(dayStart * 1000).toISOString().slice(0, 10)}`;
-  // 一次往返读完这一分钟要用的全部状态：直播要看的比赛和它们已经领过的去重键、提醒、斗鱼房间、发件队列、
-  // 到期要删的消息、今天的日报发过没有、接收人。比赛没变化时，整分钟只有这一次 D1 往返
-  const [live, claimed, remind, rooms, outbox, expire, daily, users] = await db.batch([
+  // 一次往返读完这一分钟要用的全部状态：直播要看的比赛和它们已经领过的去重键、还没提醒过的比赛、斗鱼房间、
+  // 到期要删的消息、今天的日报发过没有、接收人，以及发件要读的队列、卡片 message_id 等（flushReads）。
+  // 比赛没变化时，整分钟只有这一次 D1 往返
+  const [live, claimed, remind, rooms, expire, daily, users, ...pre] = await db.batch([
     liveRowsStmt(db, minute, t),
     claimedKeysStmt(db, minute, t),
     remindRowsStmt(db, t),
     db.prepare('SELECT * FROM streamers ORDER BY room_id'),
-    db.prepare('SELECT * FROM outbox ORDER BY id LIMIT ?').bind(SUBREQ_MAX),
     db.prepare("SELECT chat_id, message_id FROM tg_msgs WHERE tag = 'map' AND sent_at <= ?").bind(t - EXPIRE.map),
     db.prepare('SELECT 1 FROM sent WHERE key = ?').bind(dailyKey),
     recipientsStmt(db),
+    ...flushReads(db, SUBREQ_MAX),
   ]);
+  const outbox = pre[0].results;
   ctx.to = recipientsFrom(users.results, ctx.env);
 
   let queued = 0;
@@ -103,21 +110,36 @@ async function lightTick(ctx, minute, t, did) {
     did.push(n ? `${label}+${n}` : label);
     queued += n || 0;
   };
-  // 只在 UTC 0 点后的第一个小时内（正常是 00:01 那一次）
-  if (t - dayStart <= 3600 && !daily.results.length) await run('daily', () => dailyTick(ctx, dayStart, dailyKey));
-  if (live.results.length) {
-    await run(`live:${live.results.length}`, () => liveTick(ctx, minute, live.results, new Set(claimed.results.map((r) => r.key))));
+  // 队列里有近 10 分钟入队、还没发完的消息时，这一分钟只发消息：日报、直播轮询、提醒、斗鱼都顺延 2 分钟，
+  // 往返次数全留给 Telegram（3 个请求）。一次轮询入队的消息发完之前不会再轮询，两边交替进行。
+  // 只看近 10 分钟的：万一有发不出去的旧消息卡在队列里，也不会挡住别的事
+  const sending = outbox.some((r) => t - r.created_at < 600);
+  if (!sending) {
+    // 只在 UTC 0 点后的第一个小时内（正常是 00:01 那一次）
+    if (t - dayStart <= 3600 && !daily.results.length) await run('daily', () => dailyTick(ctx, dayStart, dailyKey));
+    if (live.results.length) {
+      await run(`live:${live.results.length}`, () => liveTick(ctx, minute, live.results, new Set(claimed.results.map((r) => r.key))));
+    }
+    if (remind.results.length) await run('remind', () => remindTick(ctx, remind.results));
+    // 前面已经入队了消息（再加上斗鱼可能也要入队，往返就超了）时，这一格的房间等下一轮（10 分钟后）
+    const mine = douyuSlot(rooms.results, minute);
+    if (mine.length && !queued) await run('douyu', () => douyuTick(ctx, minute, mine));
   }
-  if (remind.results.length) await run('remind', () => remindTick(ctx, remind.results));
-  if (rooms.results.length && minute % DOUYU_EVERY === 1) await run('douyu', () => douyuTick(ctx, minute, rooms.results));
-  // 这一次总共最多 FETCH_PER_TICK 个外部请求（至少留 1 个给 Telegram）：先发消息，剩下的额度再删到期的地图消息
-  ctx.cap = Math.max(FETCH_PER_TICK, ctx.used + 1);
-  if (queued > 0 || outbox.results.length > 0) {
-    const r = await step('flush', () => flush(ctx, OUTBOX_RESERVE));
+
+  // 剩下的往返次数：发件要 1 次写回 D1，其余给 Telegram 请求。这一分钟刚入队的消息不在上面那次读里，留到下一次发
+  // （入队要领键、写入两次往返，同一分钟再发就超了）
+  const left = () => TRIPS - ctx.d1 - ctx.used;
+  if (queued > 0) did.push('pending');
+  else if (outbox.length) {
+    // 至少能发队首那一条（只有旧消息卡着、这一分钟又做了别的事时才会超出 TRIPS）
+    ctx.cap = ctx.used + Math.max(left() - 1, needOf(outbox[0]));
+    const r = await step('flush', () => flush(ctx, OUTBOX_RESERVE, pre));
     if (r?.sent) did.push(`sent(${r.sent})`);
     if (r?.pending) did.push('pending');
   }
-  if (expire.results.length && ctx.left() > 0) {
+  // 到期的地图消息：每个聊天 1 个删除请求 + 最后 1 次写回 D1，额度不够就下次再删
+  if (expire.results.length && left() >= 2) {
+    ctx.cap = ctx.used + left() - 1;
     await step('expire', () => expireTick(ctx, expire.results));
     did.push(`expire(${expire.results.length})`);
   }
@@ -259,8 +281,10 @@ export async function refreshStep(ctx, slot, last = false) {
 // 提前 1 天的单条预告已经取消，由每日预报的「明日赛程」代替
 
 // 每 2 分钟查一次，窗口前后各多留一点：刚开赛 3 分钟内的也算（去重键保证只提醒一次）
+// 已经提醒过的（sent 里有 m30:<id>:<开赛时间>）直接排除，不用每次为了领键多跑一次 D1
 const remindRowsStmt = (db, t) => db.prepare(
-  "SELECT * FROM matches WHERE status = 'upcoming' AND start_ts > ? AND start_ts <= ? ORDER BY start_ts",
+  `SELECT * FROM matches m WHERE status = 'upcoming' AND start_ts > ? AND start_ts <= ?
+     AND NOT EXISTS (SELECT 1 FROM sent WHERE key = 'm30:' || m.id || ':' || m.start_ts) ORDER BY start_ts`,
 ).bind(t - 180, t + 30 * 60 + 60);
 
 export async function remindTick(ctx, results) {
@@ -529,18 +553,14 @@ export async function expireTick(ctx, results) {
 
 // ---------- 斗鱼 ----------
 
-// all：全部房间（lightTick 一起查好）。每 10 分钟一次；房间多于 12 个时分组轮转
-export async function douyuTick(ctx, minute, all) {
+// 这一次轻活轮到的房间：第 i 个房间在每 10 分钟里的第 i % 5 次轻活查（最多 MAX_ROOMS_PER_TICK 个）
+const douyuSlot = (all, minute) => all.filter((_, i) => i % DOUYU_SLOTS === Math.floor(minute / 2) % DOUYU_SLOTS).slice(0, MAX_ROOMS_PER_TICK);
+
+// rooms：这一次要查的房间（lightTick 选好，见 douyuSlot）
+export async function douyuTick(ctx, minute, rooms) {
   const db = ctx.env.DB;
   const t = now();
-  if (!all.length) return 0;
-
-  let rooms = all;
-  if (all.length > MAX_ROOMS_PER_TICK) {
-    const groups = Math.ceil(all.length / MAX_ROOMS_PER_TICK);
-    const turn = Math.floor(minute / DOUYU_EVERY);
-    rooms = all.filter((_, i) => i % groups === turn % groups);
-  }
+  if (!rooms.length) return 0;
 
   const infos = await Promise.allSettled(rooms.map((r) => roomInfo(ctx, r.room_id)));
   const stmts = [];

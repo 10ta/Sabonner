@@ -74,22 +74,54 @@ export function json(data, status = 200, extra = {}) {
 // 免费版每次调用最多 50 个子请求；留一点余量
 export const SUBREQ_MAX = 45;
 
+// 外部请求按去向计数（cron 日志里带上，tools/tail-cpu.mjs 据此看每分钟各有几次往返）
+const hostOf = (url) => {
+  const h = String(url).replace(/^https?:\/\//, '').split('/')[0];
+  return h.endsWith('bo3.gg') ? 'bo3' : h.endsWith('douyu.com') ? 'douyu' : h === 'api.telegram.org' ? 'tg' : 'other';
+};
+
 // 每次调用一个上下文：带计数的 fetch
 export function makeCtx(env) {
   const ctx = {
     env,
     tz: env.TZ || 'Asia/Shanghai',
     used: 0,
-    cap: SUBREQ_MAX,   // 这一次调用最多用到第几个子请求（轻活分钟会调低，见 engine.js 的 FETCH_PER_TICK）
+    net: {},           // 各去向的外部请求数
+    d1: 0,             // D1 往返次数（只有 cron 里计数，见 countD1）
+    cap: SUBREQ_MAX,   // 这一次调用最多用到第几个子请求（轻活分钟会调低，见 engine.js 的 TRIPS）
     left() { return Math.min(SUBREQ_MAX, ctx.cap) - ctx.used; },
     async fetch(url, init) {
       if (ctx.used >= SUBREQ_MAX) throw new Error('subrequest budget exhausted');
       ctx.used++;
+      const h = hostOf(url);
+      ctx.net[h] = (ctx.net[h] || 0) + 1;
       return fetch(url, init);
     },
   };
   return ctx;
 }
+
+// 给 ctx.env.DB 包一层，数 D1 往返次数（一次 batch、或一条语句的 all / first / run / raw 各算一次）。
+// 线上每次往返和每个外部请求都要 1–3ms CPU，是 cron 每分钟 CPU 时间的主要来源
+export function countD1(ctx) {
+  const db = ctx.env.DB;
+  const hit = (p) => { ctx.d1++; return p; };
+  const wrap = (s) => ({
+    _s: s,
+    bind: (...a) => wrap(s.bind(...a)),
+    all: () => hit(s.all()),
+    first: (c) => hit(s.first(c)),
+    run: () => hit(s.run()),
+    raw: (o) => hit(s.raw(o)),
+  });
+  ctx.env = {
+    ...ctx.env,
+    DB: { prepare: (sql) => wrap(db.prepare(sql)), batch: (ss) => hit(db.batch(ss.map((x) => x._s ?? x))) },
+  };
+  return ctx;
+}
+// 日志后缀，如「d1=2 bo3=1 tg=3」
+export const tripsText = (ctx) => [`d1=${ctx.d1}`, ...Object.entries(ctx.net).map(([k, v]) => `${k}=${v}`)].join(' ');
 
 export const isOwner = (env, id) => String(id) === String(env.OWNER_ID);
 

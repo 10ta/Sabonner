@@ -74,20 +74,28 @@ class Book {
 
 // 发件前要读的东西（队列、要编辑的卡片和结束消息的 message_id、置顶记录、会触发自动删除的聊天的发送记录、
 // 还在进行 / 未开始的比赛）一次 batch 读完。按队列内容用子查询筛，队列里没有对应的消息时这些查询都是空的
-const TRIGGER = "(kind IN ('live_open', 'daily') OR tag = 'end')";
-export async function flush(ctx, reserve = 0) {
-  const db = ctx.env.DB;
-  const budget = ctx.left() - reserve;
-  if (budget <= 0) return { sent: 0, pending: true };
+// 这一条发出去要几个 Telegram 请求：日报 3 个（发送、置顶、删旧消息）；直播卡片首发、结束消息发出后要顺带删这场之前的消息，2 个。
+// 额度不够就整条留到下一次，免得发了却没删
+export const needOf = (row) => (row.kind === 'daily' ? 3 : row.kind === 'live_open' || row.tag === 'end' ? 2 : 1);
 
-  const [out, live, pinRows, ends, msgs, act] = await db.batch([
-    db.prepare('SELECT * FROM outbox ORDER BY id LIMIT ?').bind(budget),
+// 轻活分钟把这几条查询和别的状态放在同一个 batch 里读（pre），发件时就不用再跑一次 D1
+const TRIGGER = "(kind IN ('live_open', 'daily') OR tag = 'end')";
+export const flushReads = (db, limit) => [
+    db.prepare('SELECT * FROM outbox ORDER BY id LIMIT ?').bind(limit),
     db.prepare("SELECT * FROM live_msgs WHERE match_id IN (SELECT match_id FROM outbox WHERE kind = 'live_edit')"),
     db.prepare("SELECT * FROM pins WHERE EXISTS (SELECT 1 FROM outbox WHERE kind = 'daily')"),
     db.prepare("SELECT chat_id, message_id, match_id FROM tg_msgs WHERE tag = 'end' AND match_id IN (SELECT match_id FROM outbox WHERE kind = 'end_edit')"),
     db.prepare(`SELECT * FROM tg_msgs WHERE chat_id IN (SELECT chat_id FROM outbox WHERE ${TRIGGER})`),
     db.prepare(`SELECT id FROM matches WHERE status IN ('current', 'upcoming') AND EXISTS (SELECT 1 FROM outbox WHERE ${TRIGGER})`),
-  ]);
+];
+
+// pre：flushReads 的结果（调用方已经读好，且读完之后没有再入队）；不传就自己读
+export async function flush(ctx, reserve = 0, pre = null) {
+  const db = ctx.env.DB;
+  const budget = ctx.left() - reserve;
+  if (budget <= 0) return { sent: 0, pending: true };
+
+  const [out, live, pinRows, ends, msgs, act] = pre ?? await db.batch(flushReads(db, budget));
   const rows = out.results;
   if (!rows.length) return { sent: 0, pending: false };
 
@@ -107,10 +115,7 @@ export async function flush(ctx, reserve = 0) {
   let sent = 0;
 
   for (const row of rows) {
-    // 日报要 3 个请求（发送、置顶、删旧消息）；直播卡片首发、结束消息发出后要顺带删这场之前的消息，至少 2 个。
-    // 额度不够就整条留到下一次，免得发了却没删
-    const need = row.kind === 'daily' ? 3 : row.kind === 'live_open' || row.tag === 'end' ? 2 : 1;
-    if (ctx.left() - reserve < need) break;
+    if (ctx.left() - reserve < needOf(row)) break;
     const key = `${row.match_id}:${row.chat_id}`;
     if (blocked.has(Number(row.chat_id))) { done.push(row.id); continue; }
     let res;
