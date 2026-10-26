@@ -4,3 +4,6 @@ node_modules/
 *.log
 # init.sh 保存的部署配置（含 bot token 和管理密码）
 .sabonner.env
+
+# VPS 运行器的设置
+.sabonner-runner.env

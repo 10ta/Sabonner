@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # update.sh —— Sabonner 一键更新（在部署过的那台机器上运行，需要仓库根目录有 .sabonner.env）
 #
-#   ./update.sh            同步代码 → 装依赖 → 部署 Worker、迁移数据库（init.sh，不提问）
+#   ./update.sh            同步代码 → 装依赖 → ./init.sh（运行器自检、部署 Worker、迁移数据库、重启运行器；
+#                          在终端里运行时，缺的设置会提问，比如第一次问定时工作放在哪里）
 #                          → 部署生成的配置有变化就提交 → 推送（网页由 CF Pages / Vercel 自动部署）
-#   ./update.sh --status   只看版本和 Worker 是否在线
+#   ./update.sh --status   只看版本、Worker 是否在线、运行器状态
 #   ./update.sh --no-pull  不同步 git，直接部署磁盘上的代码
 #
-# 影响：推送会触发网页重新部署；Worker 每次都会重新部署一遍（幂等，订阅数据在 D1 里不受影响）。
+# 影响：推送会触发网页重新部署；Worker 每次都会重新部署一遍（幂等，订阅数据在 D1 里不受影响）；
+#       运行器每次都会重启（几秒钟，期间的轮询顺延到下一分钟）。
 # ==== 公共部分 v1（各仓库的 update.sh 里这一段完全相同，改的时候一起改）====
 [ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -euo pipefail
@@ -109,12 +111,14 @@ br=$(git rev-parse --abbrev-ref HEAD)
 GEN=(worker/wrangler.toml web/config.js)   # init.sh 会写入的文件，允许有改动
 [[ -f .sabonner.env ]] || die "没有 .sabonner.env：这台机器还没部署过，先运行 ./init.sh"
 WORKER_URL=$(sed -n "s/^WORKER_URL=//p" .sabonner.env | tr -d "'\"")
+UNIT=/etc/systemd/system/sabonner-runner.service
 
 if (( STATUS )); then
   git fetch -q origin "$br" 2>/dev/null || warn "fetch 失败，远端版本可能不是最新"
   echo "本地     $br @ $(short)"
   echo "远端     origin/$br @ $(git rev-parse --short "origin/$br")（网页部署的就是这个）"
   if [[ -n "$WORKER_URL" ]] && curl -fsS -m 10 "$WORKER_URL/" >/dev/null 2>&1; then echo "Worker   在线"; else echo "Worker   ${Y}访问不到${N}"; fi
+  if [[ -f "$UNIT" ]]; then echo "运行器   $(systemctl is-active sabonner-runner 2>/dev/null || true)（日志：journalctl -u sabonner-runner -n 50）"; else echo "运行器   没有安装"; fi
   exit 0
 fi
 
@@ -129,9 +133,16 @@ else
   ok "无变化"
 fi
 
-step "部署 Worker（./init.sh，复用已保存的配置）"
-# stdin 接 /dev/null：万一要提问（比如 Cloudflare 登录过期）会直接失败，而不是卡住
-bash init.sh </dev/null || die "init.sh 失败，见上面的输出。登录过期的话先手动运行一次 ./init.sh"
+step "部署（./init.sh，复用已保存的配置）"
+# 在终端里运行时让 init.sh 可以提问（缺设置时）；没有终端（比如定时任务）时 stdin 接 /dev/null，要提问就直接失败而不是卡住
+if [[ -t 0 ]]; then
+  bash init.sh || die "init.sh 失败，见上面的输出"
+else
+  bash init.sh </dev/null || die "init.sh 失败，见上面的输出。需要输入什么的话在终端里运行一次 ./update.sh"
+fi
+
+# init.sh 已经重启过运行器，这里确认确实是新进程
+[[ -f "$UNIT" ]] && restarted sabonner-runner
 
 if ! git diff --quiet -- "${GEN[@]}"; then
   step "提交部署生成的配置"

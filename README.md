@@ -1,6 +1,6 @@
 # Sabonner
 
-CS2 比赛订阅与斗鱼开播提醒：Cloudflare Worker 后端 + Telegram bot + 网页（CF Pages / Vercel，沿用 1999 主题风格）。
+CS2 比赛订阅与斗鱼开播提醒：Cloudflare Worker（网页接口、Telegram 命令）+ VPS 上的运行器（定时轮询和推送，推荐；也可以不装、全部由 Worker 做）+ 网页（CF Pages / Vercel，沿用 1999 主题风格）。
 
 - 按 **tier**（S/A/B/C）、**bo3 星级**（≥ N 星）或 **队伍** 订阅比赛，三项任一命中即可：每天的预报里列出今明两天的比赛，开赛前 30 分钟再单独提醒一次
 - 比赛进行中：一张可原地更新的比分卡片；每张图打完单独推送；结束时推送胜者（大比分分出胜负就算结束，不等 bo3 改状态）
@@ -10,7 +10,7 @@ CS2 比赛订阅与斗鱼开播提醒：Cloudflare Worker 后端 + Telegram bot 
 - **直播卡片**开赛时发一条，之后比分、地图有变化就原地编辑。Telegram 上显示的一直是第一次发出的时间，所以卡片末尾写着这次内容是几点更新的；「地图 X 结束」消息和卡片上的这张图比分是同一次轮询里同时生成的
 - **自动清理消息**：「地图 X 结束」发出 5 分钟后删掉（比分已同步到直播卡片）；开赛后删掉 30 分钟提醒；比赛结束后删掉直播卡片和各张地图的消息（结束消息里已有全部比分）；新的每日预报发出后删掉前一天的预报和「已置顶」提示。赛果和开播提醒保留
 - 消息里带队伍国旗、世界排名、赛事奖金、LAN / ONLINE、星级、bo3 的 AI 预测和每张图的比分，以及赛段（如 [decider / 3rd place](https://bo3.gg/tournaments/esl-pro-league-season-24#tab-stages)，链接到 bo3 的赛段页）
-- **斗鱼主播开播**提醒（每 10 分钟查一次；下播后 20 分钟内又开播算断流重连，不重复推）
+- **斗鱼主播开播**提醒（装了运行器时每 2 分钟查一次，只用 Worker 时每 10 分钟；下播后不久又开播算断流重连，不重复推）
 - 只有管理员能改订阅；其他人 `/start` 申请，管理员批准后只能接收推送和查看
 - 网页任何人可看；管理员输入管理密码后可在网页上改订阅、审批用户
 
@@ -23,8 +23,9 @@ worker/
   wrangler.toml   Worker 配置（cron、D1 绑定）
   migrations/     D1 表结构（按编号依次执行，init.sh 自动处理）
   src/
-    index.js      入口：/tg webhook、/setup、/api/*、cron
-    engine.js     cron 调度、赛程刷新、提醒、直播轮询、斗鱼检查
+    index.js      入口：/tg webhook、/setup、/api/*、/relay、cron
+    engine.js     调度、赛程刷新、提醒、直播轮询、斗鱼检查（Worker 的 cron 和 VPS 运行器共用）
+    watch.js      运行器看门狗（Worker cron 每 10 分钟检查一次心跳）
     bo3.js        bo3.gg 适配器
     douyu.js      斗鱼适配器
     bot.js        TG 命令、按钮、用户审批
@@ -36,7 +37,13 @@ web/              静态网页，CF Pages / Vercel 直接托管，无需构建
   config.js       Worker 地址（init.sh 写入）
   theme.css       1999 主题的配色与字体（MIT）
   app.css / app.js
-init.sh           一键部署 / 更新
+runner/           VPS 运行器（Node.js 常驻进程，复用 worker/src 的代码，通过 D1 的 HTTP 接口读写同一个数据库）
+  main.mjs        调度、配置、自检
+  net.mjs         SOCKS5 代理、防拦截（退避、Worker 中转）
+  d1.mjs          D1 HTTP 接口包装成 env.DB 的写法
+  runner.env.example  运行器设置模板
+init.sh           一键部署
+update.sh         一键更新（含运行器的安装、自检、重启）
 ```
 
 ## 一键部署
@@ -52,11 +59,37 @@ cd Sabonner
 脚本会依次问你：是否继续 → Cloudflare 登录方式（浏览器 / API token）→ 时区 → bot token → 你的 Telegram user id，其余全部自动完成：建 D1 数据库并建表、部署 Worker、生成并设置 secret、注册 webhook 和命令菜单。
 
 - 配置保存在仓库根目录的 `.sabonner.env`（权限 600、已加入 `.gitignore`），**管理密码 `ADMIN_TOKEN` 也在里面**。
-- **以后更新**：`git pull && ./init.sh`，不会再提问。
+- **以后更新**：`./update.sh`（同步代码、部署 Worker、重启运行器），不会再提问。
 - **换 bot 或换管理员**：`./init.sh --reset`，会重新问 token 和 user id，并重新生成 webhook 密钥和管理密码。
 - 首次运行后 `worker/wrangler.toml` 会写入 database_id 和时区、`web/config.js` 会写入 Worker 地址，按脚本最后的提示提交即可（都不是机密）。网页部署见下面「网页」一节。
 
-部署完成后照下面「在 Telegram 里测试」一节验证。
+部署完成后照下面「在 Telegram 里测试」一节验证，然后装上 VPS 运行器（下一节）。
+
+## VPS 运行器（推荐）
+
+Cloudflare 免费版每次调用只有 10ms CPU，而且实测 cron 每分钟都在全新的实例里跑，每分钟的定时工作很难再压。所以把**所有定时工作**（直播轮询、提醒、日报、斗鱼、赛程刷新、赛后数据、发消息、删消息）交给一台常驻的 VPS：`runner/` 是一个 Node.js 进程，**业务代码和 Worker 是同一份**（worker/src），通过 Cloudflare 的 D1 HTTP 接口读写同一个数据库。Worker 只剩网页接口和 Telegram 命令，外加每 10 分钟检查一次运行器的心跳。
+
+**时间表**（都可以在 `.sabonner-runner.env` 里改）：
+
+| 工作 | 间隔 |
+|---|---|
+| 直播轮询（开赛前 30 分钟起每次都问；3 小时内要开的每 10 分钟也问一次）、赛前 30 分钟提醒、日报、发消息、删到期的地图消息 | 60 秒 |
+| 斗鱼开播检查（所有房间） | 2 分钟 |
+| 赛程刷新（所有订阅一个接一个拉完，合起来写库、删掉不再命中的比赛） | 10 分钟 |
+| 赛后数据（比赛结束 20 分钟后开始查，8 小时后放弃） | 15 分钟 |
+| 赛事列表（6 小时过期才请求）/ 清理旧数据 | 30 / 60 分钟 |
+| 心跳（写进 D1；Worker 每 10 分钟检查，超过 15 分钟没有就给管理员发 Telegram，恢复后再发一条） | 5 分钟 |
+
+和只用 Worker 比：没有往返次数的限制，入队的消息马上发、所有接收人同一分钟收到；一张图开打后不再有 20 分钟的「不问」；斗鱼从 10 分钟一次变成 2 分钟一次。
+
+**安装**：不用额外的命令。第一次运行 `./init.sh`（或者已经部署过的话在终端里运行 `./update.sh`）时会问「定时工作放在哪里」：选 1 就是这台机器上的运行器（需要 systemd、Node.js 20+、root），接着问要不要走代理（填 `socks5://主机:端口`，直连输入 `-`）。之后脚本会：生成 `.sabonner-runner.env`（运行器设置，已加入 `.gitignore`）→ 运行器自检（D1、Telegram、bo3、斗鱼能不能通，不通就停下，线上保持原样）→ 部署 Worker（cron 改成每 10 分钟只检查心跳）→ 安装并启动 systemd 服务 `sabonner-runner`（开机自启）。选择记在 `.sabonner.env` 的 `RUNNER`（`vps` / `worker`），以后 `./update.sh` 不再问，每次都先自检、部署完再重启运行器。
+
+- 读写 D1 用 `.sabonner.env` 里保存的 Cloudflare token（`init.sh` 用 API token 方式登录时保存的那个，带 D1 编辑权限）；用浏览器登录的没有保存 token，脚本会让你另外粘贴一个（只要「Account · D1 · Edit」权限），存在 `.sabonner-runner.env` 的 `RUNNER_CF_TOKEN`。
+- 代理、各项间隔都在 `.sabonner-runner.env` 里，改完 `systemctl restart sabonner-runner`。
+- 走代理时用到的域名：`api.bo3.gg`、`m.douyu.com`（这两个建议走 WARP 之类的出口）、`api.telegram.org`、`api.cloudflare.com`（读写 D1），以及你的 Worker 域名（备用的中转出口）。
+- **防拦截**：同一个站点两次请求至少隔 1 秒；bo3 或斗鱼返回 429 / 403 / 503，或者返回了网页（人机验证页）而不是数据时，暂停直连 15 分钟（再被拦截就翻倍，最长 4 小时），期间改走 Worker 的 `/relay` 中转（只放行这两个站，需要管理密码），并给管理员发一条 Telegram；直连恢复后再发一条。`RUNNER_RELAY=0` 关掉中转。
+- 看日志：`journalctl -u sabonner-runner -f`。有事做的那一轮写一行（如 `[run] live:1+6 sent(6) 0.4s`），每小时一行汇总（D1 请求次数和读写行数、各站点请求数）。手动自检：`node runner/main.mjs --check`。TG 里 `/status` 也会显示运行器在不在线。
+- **换方式**：把 `.sabonner.env` 里的 `RUNNER=` 那一行清空，再在终端里运行 `./update.sh`，会重新问。选 2（Worker cron）时脚本会把 cron 改回每分钟、停掉并移除运行器服务（`.sabonner-runner.env` 留着，换回来还能用）。
 
 ## 手动部署（init.sh 做的事，排错时参考）
 
@@ -259,6 +292,8 @@ Framework preset 选 **None**，Build command **留空**，Build output director
 | `/stop` 不再接收推送 | `/status` 运行状态 |
 
 ## 运行方式
+
+装了 VPS 运行器时见上面那一节的时间表。下面是**只用 Worker**（`wrangler.toml` 的 crons 为每分钟）时的方式：
 
 cron 每分钟一次。免费版**每次调用最多 10ms CPU**（偶尔超出会被容忍，经常超出会被终止）。最耗 CPU 的是解析 bo3 返回的比赛列表，所以按分钟错开，**一次调用最多发一个 bo3 列表请求**：
 

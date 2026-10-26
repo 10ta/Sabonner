@@ -2,11 +2,13 @@
 # Sabonner 一键部署 / 更新
 #
 # 用法（在仓库根目录）：
-#   ./init.sh           首次：登录 → 建库 → 建表 → 部署 → 设置 secret → 注册 webhook
-#                       再次：复用已保存的配置，等于"更新部署"
-#   ./init.sh --reset   重新输入 bot token / owner id，并重新生成 webhook 密钥和管理密码
+#   ./init.sh           首次：登录 → 选定时工作放在哪里（本机运行器 / Worker cron）→ 建库 → 建表
+#                       → 部署 → 设置 secret → 注册 webhook → 启动运行器
+#                       再次：复用已保存的配置，等于"更新部署"（./update.sh 会调用它）
+#   ./init.sh --reset   重新输入 bot token / owner id、重新选定时工作放在哪里，并重新生成 webhook 密钥和管理密码
 #
-# 配置保存在仓库根目录的 .sabonner.env（权限 600，已在 .gitignore 里），不要提交。
+# 配置保存在仓库根目录的 .sabonner.env（权限 600，已在 .gitignore 里），不要提交；
+# 选了本机运行器时，运行器自己的设置（代理、间隔）在 .sabonner-runner.env。
 
 set -euo pipefail
 
@@ -30,7 +32,7 @@ cd "$WORKER_DIR" || die "找不到 worker 目录：$WORKER_DIR"
 wr() { npx --no-install wrangler "$@"; }
 
 # ---------- 0. 读取已保存的配置 ----------
-TG_TOKEN="" OWNER_ID="" TG_WEBHOOK_SECRET="" ADMIN_TOKEN="" WORKER_URL="" TZ_NAME=""
+TG_TOKEN="" OWNER_ID="" TG_WEBHOOK_SECRET="" ADMIN_TOKEN="" WORKER_URL="" TZ_NAME="" RUNNER=""
 SAVED_CF_TOKEN="" SAVED_CF_ACCOUNT=""
 FIRST_RUN=1
 if [[ -f "$ENV_FILE" ]]; then
@@ -45,7 +47,7 @@ save_env() {
   local tmp; tmp="$(mktemp)"
   {
     echo "# Sabonner 部署配置（由 init.sh 生成，勿提交）"
-    for k in TG_TOKEN OWNER_ID TG_WEBHOOK_SECRET ADMIN_TOKEN WORKER_URL TZ_NAME SAVED_CF_TOKEN SAVED_CF_ACCOUNT; do
+    for k in TG_TOKEN OWNER_ID TG_WEBHOOK_SECRET ADMIN_TOKEN WORKER_URL TZ_NAME SAVED_CF_TOKEN SAVED_CF_ACCOUNT RUNNER; do
       printf '%s=%q\n' "$k" "${!k}"
     done
   } > "$tmp"
@@ -128,6 +130,88 @@ set_toml() {
 set_toml TZ "$TZ_NAME"
 ok "时区 $TZ_NAME"
 
+# ---------- 3b. 定时工作放在哪里 ----------
+# RUNNER=vps：这台机器上的运行器（runner/，systemd 服务 sabonner-runner），Worker 的 cron 每 10 分钟只检查运行器的心跳
+# RUNNER=worker：Worker 每分钟的 cron 自己跑全部定时工作
+# 选择存在 .sabonner.env 的 RUNNER；想换的话把那一行清空（RUNNER=），再运行 ./update.sh 或 ./init.sh 会重新问
+RUNNER_ENV="$ROOT/.sabonner-runner.env"
+UNIT=/etc/systemd/system/sabonner-runner.service
+CAN_ASK=0; [[ -t 0 ]] && CAN_ASK=1
+NEW_RUNNER=0
+runner_get() { [[ -f "$RUNNER_ENV" ]] && sed -n "s/^$1=//p" "$RUNNER_ENV" | tail -1 | tr -d "'\"" || true; }
+runner_set() {   # 键 值：改 .sabonner-runner.env 里的这一行（没有就追加）
+  KEY="$1" VAL="$2" node -e '
+    const fs = require("fs"); const f = process.argv[1]; const { KEY, VAL } = process.env;
+    const line = `${KEY}=${/^[A-Za-z0-9_.:/@%+=,-]*$/.test(VAL) ? VAL : `'"'"'${VAL.replace(/'"'"'/g, `'"'"'\\'"'"''"'"'`)}'"'"'`}`;
+    let s = fs.readFileSync(f, "utf8"); const re = new RegExp(`^${KEY}=.*$`, "m");
+    s = re.test(s) ? s.replace(re, () => line) : s.replace(/\n?$/, `\n${line}\n`);
+    fs.writeFileSync(f, s);' "$RUNNER_ENV"
+}
+set_crons() {
+  VAL="$1" node -e '
+    const fs = require("fs"); const f = "wrangler.toml"; const s = fs.readFileSync(f, "utf8");
+    const re = /^crons\s*=\s*\[.*\]\s*$/m;
+    if (!re.test(s)) { console.error("wrangler.toml 里没有 crons"); process.exit(1); }
+    fs.writeFileSync(f, s.replace(re, `crons = ["${process.env.VAL}"]`));'
+}
+
+if (( RESET )) || [[ -z "$RUNNER" ]]; then
+  step "定时工作放在哪里"
+  if (( CAN_ASK )); then
+    cat <<EOF
+直播轮询、赛前提醒、斗鱼开播检查、发消息这些定时工作：
+  1) 放在这台机器上的运行器（推荐）：直播每分钟更新、消息马上发，Cloudflare 上几乎不耗 CPU。
+     需要 systemd、root，这台机器要一直开着；它停了推送就停（Worker 会发 Telegram 提醒你）
+  2) 放在 Cloudflare Worker 的每分钟 cron：不依赖这台机器，但受免费版每次 10ms CPU 的限制，比分和推送会慢几分钟
+EOF
+    case "$(ask '选 1 还是 2 [1]：')" in 2) RUNNER=worker ;; *) RUNNER=vps ;; esac
+    NEW_RUNNER=1
+  else
+    warn "没有终端可以提问：这次先按 Worker cron 部署。在终端里运行 ./update.sh 或 ./init.sh 时会问定时工作放在哪里"
+  fi
+fi
+
+if [[ "$RUNNER" == vps ]]; then
+  step "准备运行器"
+  [[ $EUID -eq 0 ]] || die "运行器要装成 systemd 服务，需要用 root 运行（或者把 .sabonner.env 里的 RUNNER 改成 worker）"
+  [[ -d /run/systemd/system ]] || die "这台机器没有 systemd，装不了运行器服务（把 .sabonner.env 里的 RUNNER 改成 worker 改用 Worker cron）"
+  if [[ ! -f "$RUNNER_ENV" ]]; then
+    cp "$ROOT/runner/runner.env.example" "$RUNNER_ENV"
+    chmod 600 "$RUNNER_ENV"
+    NEW_RUNNER=1
+  fi
+  if (( NEW_RUNNER && CAN_ASK )); then
+    cur="$(runner_get RUNNER_PROXY)"
+    echo "运行器的请求（bo3、斗鱼、Telegram、Cloudflare）要不要走代理？"
+    echo "  填 socks5://主机:端口（例如 socks5://127.0.0.1:7050），直连就输入 -"
+    p="$(ask "代理${cur:+ [$cur]}：")"
+    [[ "$p" == "-" ]] && p="" || p="${p:-$cur}"
+    [[ -z "$p" || "$p" =~ ^socks5h?:// ]] || die "只支持 socks5:// 开头的代理：$p"
+    runner_set RUNNER_PROXY "$p"
+  fi
+  # 读写 D1 用的 token：默认用上面登录时保存的 SAVED_CF_TOKEN；浏览器登录的话没有，单独要一个
+  if [[ -z "$SAVED_CF_TOKEN" && -z "$(runner_get RUNNER_CF_TOKEN)" ]]; then
+    (( CAN_ASK )) || die "运行器需要一个 Cloudflare API token 读写 D1，在终端里运行一次 ./init.sh 输入"
+    cat <<'EOF'
+运行器要一个 Cloudflare API token 读写 D1（浏览器登录的方式没有保存 token）：
+  https://dash.cloudflare.com/profile/api-tokens → Create Token → Custom token → 权限只加一行 "Account · D1 · Edit"
+EOF
+    runner_set RUNNER_CF_TOKEN "$(ask_secret '粘贴 token：')"
+  fi
+  proxy="$(runner_get RUNNER_PROXY)"
+  set_crons "*/10 * * * *"
+  ok "定时工作：这台机器上的运行器（代理：${proxy:-直连}；其余设置在 .sabonner-runner.env）"
+else
+  set_crons "* * * * *"
+  ok "定时工作：Worker 每分钟的 cron"
+  if [[ -f "$UNIT" ]]; then
+    [[ $EUID -eq 0 ]] || die "这台机器上装着运行器，换成 Worker cron 要先停掉它，需要 root 运行"
+    systemctl disable --now -q sabonner-runner 2>/dev/null || true
+    rm -f "$UNIT"; systemctl daemon-reload
+    ok "已停止并移除运行器服务（.sabonner-runner.env 留着，以后换回来还能用）"
+  fi
+fi
+
 # ---------- 4. D1 数据库 ----------
 step "准备 D1 数据库"
 d1_id() {
@@ -176,6 +260,13 @@ NEW_SECRET=0
 if (( RESET )) || [[ -z "$TG_WEBHOOK_SECRET" ]]; then TG_WEBHOOK_SECRET="$(rand)"; NEW_SECRET=1; fi
 if (( RESET )) || [[ -z "$ADMIN_TOKEN" ]]; then ADMIN_TOKEN="$(rand)"; fi
 save_env
+
+# 运行器自检：在动 Worker 之前确认运行器在这台机器上能连通 D1、Telegram、bo3、斗鱼。
+# 不通就停在这里，线上保持原样
+if [[ "$RUNNER" == vps ]]; then
+  step "运行器自检"
+  (cd "$ROOT" && node runner/main.mjs --check) || die "运行器自检没通过，见上面的 ✘（代理等设置在 .sabonner-runner.env）。Worker 还没有改动"
+fi
 
 # ---------- 6. 部署 ----------
 step "部署 Worker"
@@ -255,6 +346,33 @@ if grep -q '"last_error_message"' <<<"$info"; then
   warn "Telegram 报告过 webhook 错误：$(sed -E 's/.*"last_error_message":"([^"]*)".*/\1/' <<<"$info")（旧错误可以忽略，发条消息再看）"
 fi
 
+# ---------- 9. 运行器 ----------
+if [[ "$RUNNER" == vps ]]; then
+  step "启动运行器"
+  printf '%s\n' \
+    '[Unit]' \
+    'Description=Sabonner runner (bo3 / Douyu polling, Telegram pushes)' \
+    'After=network-online.target' \
+    'Wants=network-online.target' \
+    '' \
+    '[Service]' \
+    'Type=simple' \
+    "WorkingDirectory=$ROOT" \
+    "ExecStart=$(command -v node) runner/main.mjs" \
+    'Restart=always' \
+    'RestartSec=15' \
+    '' \
+    '[Install]' \
+    'WantedBy=multi-user.target' > "$UNIT"
+  systemctl daemon-reload
+  systemctl enable -q sabonner-runner
+  systemctl restart sabonner-runner
+  sleep 3
+  systemctl is-active --quiet sabonner-runner || die "运行器没有起来，看日志：journalctl -u sabonner-runner -n 50 --no-pager"
+  ok "运行器运行中（systemd 服务 sabonner-runner，开机自启）"
+  journalctl -u sabonner-runner -n 3 --no-pager -o cat 2>/dev/null | sed 's/^/    /' || true
+fi
+
 # ---------- 完成 ----------
 cat <<EOF
 
@@ -268,8 +386,9 @@ ${G}${B}部署完成${N}
   /team spirit     搜索并订阅队伍
   /room 6657       添加斗鱼主播
 
+定时工作：  $([[ "$RUNNER" == vps ]] && echo "这台机器上的运行器（日志：journalctl -u sabonner-runner -f）" || echo "Worker 每分钟的 cron")
 看实时日志：  cd worker && npx wrangler tail
-以后更新：    git pull && ./init.sh
+以后更新：    ./update.sh
 
 网页：把仓库接到 Cloudflare Pages 和 / 或 Vercel，根目录填 web，没有构建命令（见 README「网页」一节）
 EOF

@@ -1,6 +1,8 @@
-// cron 调度与事件引擎
+// 调度与事件引擎。两种跑法，代码相同、设定不同（见 WORKER_OPTS / runner/main.mjs 里的 VPS_OPTS）：
+//   ① Worker 的每分钟 cron（runCron）：受免费版每次 10ms CPU 限制，下面这些错开、预算都是为它做的
+//   ② VPS 上的常驻进程（runner/，推荐）：runTick 每分钟一次，其余工作各自定时，没有 CPU 限制，时效更好
 //
-// cron 每分钟一次。免费版每次调用最多 10ms CPU（偶尔超出会被容忍，经常超出会被终止），
+// ① 的说明：cron 每分钟一次。免费版每次调用最多 10ms CPU（偶尔超出会被容忍，经常超出会被终止），
 // 最耗 CPU 的是解析 bo3 的大响应，所以按分钟错开，一次调用最多发一个 bo3 列表请求：
 //   偶数分钟（重活轮换，20 分钟一轮，见 HEAVY）：赛程刷新按 tier 逐个、作为队伍 1 / 队伍 2、星级各占一分钟，
 //     一轮最后一个顺带删掉不再命中订阅的比赛；中间穿插赛后数据（只查赛后 1 / 2 / 4 / 8 小时到点的）和赛事列表 / 清理
@@ -21,6 +23,17 @@ import { enqueue, fanout, flush, flushReads, needOf } from './outbox.js';
 import { tg } from './tgapi.js';
 
 const WINDOW = 7 * 86400;        // 只跟踪 7 天内的比赛
+
+// Worker cron 的设定；VPS 运行器用 ctx.opts 覆盖（见 runner/main.mjs）
+export const WORKER_OPTS = {
+  budget: true,          // 每分钟往返次数有上限（TRIPS），刚入队的消息下一次才发，斗鱼分 5 格轮流查
+  pre: 0,                // 预定开赛前多少秒开始每次都问 bo3（0 = 到点才问）
+  mapQuiet: 20 * 60,     // 一张图开打后多久内不问 bo3（0 = 不跳过）
+  douyuEvery: 10,        // 每个斗鱼房间多少分钟查一次
+  statsEvery: false,     // false：赛后数据只在结束后 1 / 2 / 4 / 8 小时查；true：每次调用都查（运行器每 15 分钟调用一次）
+  statsPerTick: 3,       // 一次最多取几场的赛后数据
+};
+const optsOf = (ctx) => ctx.opts || WORKER_OPTS;
 const OUTBOX_RESERVE = 0;
 const MAX_ROOMS_PER_TICK = 12;
 
@@ -58,6 +71,15 @@ export async function runCron(ctx) {
   else await lightTick(ctx, minute, t, did);
   const iso = `n=${isoCalls}${firstSteps.length ? ` first=${firstSteps.join(',')}` : ''}`;
   console.log(`[cron] ${did.join(' ') || 'idle'} | ${tripsText(ctx)} ${iso}`);
+}
+
+// 运行器每分钟调用：直播轮询、提醒、日报、斗鱼（ctx.flags.douyu 为真时）、发件、删到期消息。
+// 返回这一次做了什么（和 cron 日志同样的格式）
+export async function runTick(ctx) {
+  const t = now();
+  const did = [];
+  await lightTick(ctx, Math.floor(t / 60), t, did);
+  return did.join(' ') || 'idle';
 }
 
 // ---------- 偶数分钟：一件重活 ----------
@@ -101,9 +123,12 @@ async function lightTick(ctx, minute, t, did) {
   // 一次往返读完这一分钟要用的全部状态：直播要看的比赛和它们已经领过的去重键、还没提醒过的比赛、斗鱼房间、
   // 到期要删的消息、今天的日报发过没有、接收人，以及发件要读的队列、卡片 message_id 等（flushReads）。
   // 比赛没变化时，整分钟只有这一次 D1 往返
+  const o = optsOf(ctx);
+  // 每 10 分钟一次把 3 小时内要开的比赛也带上（运行器自己算好放在 ctx.flags.liveAll）
+  const all = ctx.flags?.liveAll ?? minute % 10 === 5;
   const [live, claimed, remind, rooms, expire, daily, users, ...pre] = await db.batch([
-    liveRowsStmt(db, minute, t),
-    claimedKeysStmt(db, minute, t),
+    liveRowsStmt(db, all, t, o.pre),
+    claimedKeysStmt(db, all, t, o.pre),
     remindRowsStmt(db, t),
     db.prepare('SELECT * FROM streamers ORDER BY room_id'),
     db.prepare("SELECT chat_id, message_id FROM tg_msgs WHERE tag = 'map' AND sent_at <= ?").bind(t - EXPIRE.map),
@@ -121,6 +146,27 @@ async function lightTick(ctx, minute, t, did) {
     did.push(n ? `${label}+${n}` : label);
     queued += n || 0;
   };
+  if (!o.budget) {
+    // 运行器：没有往返次数的限制，到期的事全做，入队的消息马上发
+    if (t - dayStart <= 3600 && !daily.results.length) await run('daily', () => dailyTick(ctx, dayStart, dailyKey));
+    if (live.results.length) {
+      await run(`live:${live.results.length}`, () => liveTick(ctx, minute, live.results, new Set(claimed.results.map((r) => r.key))));
+    }
+    if (remind.results.length) await run('remind', () => remindTick(ctx, remind.results));
+    if (ctx.flags?.douyu && rooms.results.length) await run('douyu', () => douyuTick(ctx, minute, rooms.results));
+    if (queued > 0 || outbox.length) {
+      // 这一次入队了新消息时上面那次读到的队列已经过时，让 flush 自己重新读
+      const r = await step('flush', () => flush(ctx, 0, queued > 0 ? null : pre));
+      if (r?.sent) did.push(`sent(${r.sent})`);
+      if (r?.pending) did.push('pending');
+    }
+    if (expire.results.length) {
+      await step('expire', () => expireTick(ctx, expire.results));
+      did.push(`expire(${expire.results.length})`);
+    }
+    return;
+  }
+
   // 队列里有近 10 分钟入队、还没发完的消息时，这一分钟只发消息：日报、直播轮询、提醒、斗鱼都顺延 2 分钟，
   // 往返次数全留给 Telegram（3 个请求）。一次轮询入队的消息发完之前不会再轮询，两边交替进行。
   // 只看近 10 分钟的：万一有发不出去的旧消息卡在队列里，也不会挡住别的事
@@ -296,6 +342,31 @@ export async function refreshStep(ctx, slot, last = false) {
   return part || last ? { part: part || slot, tracked: own.length } : null;
 }
 
+// 运行器用：所有部分一个接一个拉完（不并发，对 bo3 客气一点），合起来写库，最后用全部结果删比赛。
+// 任何一部分请求失败就整次作废（抛出），不会拿不完整的结果去删比赛
+export async function refreshAll(ctx) {
+  const db = ctx.env.DB;
+  const t = now();
+  const res = await db.batch([...subsStmts(db), countriesStmt(db)]);
+  const subs = subsFrom(res);
+  primeCountries(ctx, res[3].results[0]);
+  const parts = partsOf(subs);
+  const map = new Map();
+  const byTeam = [];
+  const kvs = [];
+  for (const part of parts) {
+    const list = await fetchPart(ctx, part, subs);
+    if (part.startsWith('team')) byTeam.push(...list);
+    const own = pick(list, t);
+    for (const [id, m] of own) map.set(id, m);
+    kvs.push(partStmt(db, part, t, [...own.keys()]));
+  }
+  const stmts = await writeStmts(ctx, map, subs, byTeam.length ? byTeam : null);
+  stmts.push(...kvs, pruneStmt(db, [...map.keys()], t), setKVStmt(db, 'last_refresh', t));
+  await db.batch(stmts);
+  return { parts: parts.length, tracked: map.size };
+}
+
 // ---------- 赛前提醒（开赛前 30 分钟） ----------
 // 提前 1 天的单条预告已经取消，由每日预报的「明日赛程」代替
 
@@ -375,20 +446,20 @@ export function seriesDecided(m) {
 // 免得一场「僵尸比赛」让直播轮询每次都去请求 bo3
 // 另外每 10 分钟把 3 小时内要开的也带上问一次：bo3 偶尔会把开赛时间改早（实测有开打时才把时间改成实际开始时间的），
 // 只按库里的旧时间等，会一直等到旧时间才发现已经开打了
+// pre：预定开赛前多少秒就开始每次都问（Worker 为 0，运行器 30 分钟）
 const EARLY = 3 * 3600;
-function liveWhere(minute, t) {
-  const all = minute % 10 === 5;
+function liveWhere(all, t, pre = 0) {
   return [`(status = 'current' OR (status = 'upcoming' AND start_ts <= ?${all ? '' : ' AND start_ts > ?'}))`,
-    all ? [t + EARLY] : [t, t - STALE_UPCOMING]];
+    all ? [t + Math.max(EARLY, pre)] : [t + pre, t - STALE_UPCOMING]];
 }
-function liveRowsStmt(db, minute, t) {
-  const [where, args] = liveWhere(minute, t);
+function liveRowsStmt(db, all, t, pre) {
+  const [where, args] = liveWhere(all, t, pre);
   return db.prepare(`SELECT * FROM matches WHERE ${where}`).bind(...args);
 }
 // 这些比赛已经领过的去重键（open / end / map:<id>:<n>）。直播轮询只领还没领过的，
 // 比分没变的时候就不用再为领键多跑一次 D1（map 键用区间比较，走 sent 的主键索引）
-function claimedKeysStmt(db, minute, t) {
-  const [where, args] = liveWhere(minute, t);
+function claimedKeysStmt(db, all, t, pre) {
+  const [where, args] = liveWhere(all, t, pre);
   return db.prepare(`SELECT s.key FROM sent s JOIN (SELECT id FROM matches WHERE ${where}) m
     ON s.key = 'open:' || m.id OR s.key = 'end:' || m.id OR (s.key > 'map:' || m.id || ':' AND s.key < 'map:' || m.id || ';')`).bind(...args);
 }
@@ -404,17 +475,16 @@ async function waitedTooLong(db, id, t) {
   return !r || t - r.at >= MAP_WAIT;
 }
 
-// 一张图开打后（第一次看到它「进行中」的时间记在地图数据的 t 上）MAP_QUIET 内不问 bo3：
+// 一张图开打后（第一次看到它「进行中」的时间记在地图数据的 t 上）opts.mapQuiet 内不问 bo3（只在 Worker 上）：
 // 只报到地图级比分，一张图再快也要二十多分钟，这段时间问了也不会有变化
-const MAP_QUIET = 20 * 60;
-const quiet = (m, t) => m.status === 'current' && (m.maps || []).some((g) => g.status === 'current' && g.t && t - g.t < MAP_QUIET);
+const quiet = (m, t, q) => q > 0 && m.status === 'current' && (m.maps || []).some((g) => g.status === 'current' && g.t && t - g.t < q);
 
 // results：liveRowsStmt 查出来的比赛（按 id 一次向 bo3 查完，不多花请求）；
 // claimed：这些比赛已经领过的去重键（lightTick 一起查好），不传就全部重新领
 export async function liveTick(ctx, minute, results, claimed = null) {
   const db = ctx.env.DB;
   const t = now();
-  const olds = results.map(parseMatchRow).filter((m) => !quiet(m, t));
+  const olds = results.map(parseMatchRow).filter((m) => !quiet(m, t, optsOf(ctx).mapQuiet));
   if (!olds.length) return 0;
 
   const fresh = new Map((await liveByIds(ctx, olds)).map((m) => [m.id, m]));
@@ -492,7 +562,6 @@ export async function liveTick(ctx, minute, results, claimed = null) {
 const STATS_AT = [1, 2, 4, 8].map((h) => h * 3600);
 const STATS_WINDOW = 12 * 60;   // 这一格每 8–12 分钟轮到一次：落在检查点之后这段时间里就查
 const STATS_GIVEUP = STATS_AT[STATS_AT.length - 1] + STATS_WINDOW;
-const STATS_PER_TICK = 3;
 
 export async function statsTick(ctx) {
   const db = ctx.env.DB;
@@ -502,11 +571,13 @@ export async function statsTick(ctx) {
      WHERE m.status = 'finished' AND m.stats IS NULL AND m.start_ts > ?`,
   ).bind(t - 3 * 86400).all();
   if (!results.length) return 0;
+  const o = optsOf(ctx);
   const due = [], giveUp = [];
   for (const r of results) {
     const el = t - r.ended;
     if (el >= STATS_GIVEUP) giveUp.push(Number(r.id));
-    else if (STATS_AT.some((c) => el >= c && el < c + STATS_WINDOW)) due.push(r);
+    // 运行器每次都查（它自己每 15 分钟调用一次），结束 20 分钟后开始；Worker 只在检查点查
+    else if (o.statsEvery ? el >= 20 * 60 : STATS_AT.some((c) => el >= c && el < c + STATS_WINDOW)) due.push(r);
   }
   const giveUpStmt = giveUp.length ? [db.prepare(`UPDATE matches SET stats = '[]' WHERE id IN (${giveUp.join(',')})`)] : [];
   if (!due.length) {
@@ -522,7 +593,7 @@ export async function statsTick(ctx) {
   let to = null;
   for (const old of olds) {
     const f = fresh.get(old.id);
-    if (f?.parsed === 'done' && fetched < STATS_PER_TICK && ctx.left() > 2) {
+    if (f?.parsed === 'done' && fetched < o.statsPerTick && ctx.left() > 2) {
       fetched++;
       const stats = await matchStats(ctx, old).catch(() => null);
       if (stats?.length) {
@@ -594,8 +665,8 @@ export async function douyuTick(ctx, minute, rooms) {
     const info = res.value;
     const wasLive = !!r.live;
     if (info.live !== wasLive) {
-      // 下播后 20 分钟内又开播（断流重连；每 10 分钟查一次，也就是只有一次看到下播）不算新开播
-      const flap = info.live && r.changed_at && t - r.changed_at < 2 * DOUYU_EVERY * 60;
+      // 下播后不久又开播（断流重连）不算新开播：至少 10 分钟，查得慢时放宽到两次检查的间隔
+      const flap = info.live && r.changed_at && t - r.changed_at < Math.max(600, 2 * optsOf(ctx).douyuEvery * 60);
       // 同一场直播（开播时间没变）只推一次
       const sameShow = info.live && info.showTime && info.showTime === r.show_time;
       // 之前没记录过开播时间（刚升级、刚添加）且这场已经开了半小时以上：说明不是刚开播，只记录不推

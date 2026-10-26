@@ -2,9 +2,11 @@ name = "sabonner"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
 
-# 每分钟一次。占用 Cloudflare 账户 5 个免费 cron 名额中的 1 个。
+# 占用 Cloudflare 账户 5 个免费 cron 名额中的 1 个。
+#   "*/10 * * * *"：定时工作由 VPS 上的运行器（runner/）做，Worker 只每 10 分钟检查一次运行器的心跳（推荐）
+#   "* * * * *"   ：不用运行器，Worker 每分钟自己跑全部定时工作（受免费版 10ms CPU 限制，时效差一些）
 [triggers]
-crons = ["* * * * *"]
+crons = ["*/10 * * * *"]
 
 [[d1_databases]]
 binding = "DB"

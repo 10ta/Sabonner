@@ -211,20 +211,27 @@ async function usersView(db) {
 
 async function statusText(env) {
   const db = env.DB;
-  const [a, b, c, d, e] = await db.batch([
+  const [a, b, c, d, e, f] = await db.batch([
     db.prepare("SELECT COUNT(*) n FROM matches WHERE status IN ('upcoming', 'current')"),
     db.prepare("SELECT COUNT(*) n FROM matches WHERE status = 'current'"),
     db.prepare('SELECT COUNT(*) n FROM outbox'),
     db.prepare("SELECT COUNT(*) n FROM users WHERE status = 'approved'"),
     db.prepare("SELECT v FROM kv WHERE k = 'last_refresh'"),
+    db.prepare("SELECT v FROM kv WHERE k = 'runner'"),
   ]);
   const last = Number(e.results[0]?.v) || 0;
+  let runner = null;
+  try { runner = JSON.parse(f.results[0]?.v || 'null'); } catch { /* 当没有 */ }
+  const age = runner?.at ? now() - runner.at : null;
+  const runnerLine = !runner ? '运行器：没有（由 Worker 的 cron 运行）'
+    : `运行器：${age < 15 * 60 ? '在线' : '⚠️ 离线'}（${esc(runner.host || '?')}，${Math.round(age / 60)} 分钟前心跳，版本 ${esc(runner.ver || '?')}）${runner.blocked?.length ? `\n⚠️ 被拦截、改走中转：${runner.blocked.map(esc).join('、')}` : ''}`;
   return [
     '<b>运行状态</b>',
     `跟踪比赛：${a.results[0].n}（进行中 ${b.results[0].n}）`,
     `待发消息：${c.results[0].n}`,
     `已批准用户：${d.results[0].n}`,
     `上次刷新：${last ? `${Math.round((now() - last) / 60)} 分钟前` : '从未'}`,
+    runnerLine,
   ].join('\n');
 }
 

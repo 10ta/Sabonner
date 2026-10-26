@@ -2,12 +2,16 @@
 //   POST /tg        Telegram webhook（校验 secret header）
 //   GET  /setup     注册 webhook 和命令菜单（需要 ?token=ADMIN_TOKEN）
 //   GET  /api/*     网页用的只读接口；/api/admin/* 需要 Authorization: Bearer ADMIN_TOKEN
-//   cron            见 engine.js
+//   GET  /relay     VPS 运行器的备用出口：运行器直连 bo3 / 斗鱼被拦截时经这里转发（需要 x-relay-key: ADMIN_TOKEN，只放行这两个站）
+//   cron            每 10 分钟：检查 VPS 运行器的心跳（watch.js）；改成每分钟（"* * * * *"）就是不用运行器、由 Worker 自己跑（engine.js）
 
 import { makeCtx, json, safeEqual, CORS } from './util.js';
 import { handleUpdate, setup } from './bot.js';
 import { handleApi } from './api.js';
 import { runCron } from './engine.js';
+import { watchRunner } from './watch.js';
+
+const RELAY_HOSTS = new Set(['api.bo3.gg', 'm.douyu.com']);
 
 export default {
   async fetch(req, env, execCtx) {
@@ -50,11 +54,24 @@ export default {
       });
     }
 
+    if (path === '/relay' && req.method === 'GET') {
+      if (!safeEqual(req.headers.get('x-relay-key'), env.ADMIN_TOKEN)) return new Response('forbidden', { status: 403 });
+      let target;
+      try { target = new URL(url.searchParams.get('u') || ''); } catch { return new Response('bad url', { status: 400 }); }
+      if (target.protocol !== 'https:' || !RELAY_HOSTS.has(target.hostname)) return new Response('forbidden', { status: 403 });
+      const headers = {};
+      for (const k of ['accept', 'user-agent', 'referer']) if (req.headers.get(k)) headers[k] = req.headers.get(k);
+      const r = await fetch(target.toString(), { headers });
+      return new Response(r.body, { status: r.status, headers: { 'content-type': r.headers.get('content-type') || 'application/octet-stream' } });
+    }
+
     if (path === '/') return new Response('Sabonner is running.', { headers: { 'content-type': 'text/plain; charset=utf-8' } });
     return new Response('not found', { status: 404 });
   },
 
   async scheduled(event, env, execCtx) {
-    execCtx.waitUntil(runCron(makeCtx(env)));
+    // wrangler.toml 里 cron 是每分钟时 Worker 自己跑全部定时工作（不用 VPS 运行器的部署方式）；否则只检查运行器还活着没有
+    if (event.cron === '* * * * *') execCtx.waitUntil(runCron(makeCtx(env)));
+    else execCtx.waitUntil(watchRunner(makeCtx(env)).catch((e) => console.error('[watch]', e?.stack || e)));
   },
 };
