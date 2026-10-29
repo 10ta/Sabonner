@@ -75,7 +75,8 @@
     if (!API) throw new Error('没有配置 API 地址（config.js）');
     const headers = { ...(opts.body ? { 'content-type': 'application/json' } : {}) };
     if (opts.admin) headers.authorization = `Bearer ${state.token}`;
-    const r = await fetch(API + path, { method: opts.method || 'GET', headers, cache: 'no-store', body: opts.body ? JSON.stringify(opts.body) : undefined });
+    // 只读接口让浏览器按响应头缓存（Worker 返回 max-age=20），管理操作和 opts.fresh 才绕过缓存
+    const r = await fetch(API + path, { method: opts.method || 'GET', headers, cache: opts.admin || opts.fresh ? 'no-store' : 'default', body: opts.body ? JSON.stringify(opts.body) : undefined });
     const j = await r.json().catch(() => ({}));
     if (r.status === 401 && opts.admin) { logout(); throw new Error('管理密码无效，已退出'); }
     if (!r.ok) throw new Error(j.error || `请求失败（${r.status}）`);
@@ -85,10 +86,34 @@
   let lastLoad = 0;
   let lastSig = '';
   let lastPaint = 0;
+  // 上次拿到的 /api/overview 存在本机：20 秒内反复刷新页面直接用它，不请求 Worker（免费版每次调用只有 10ms CPU）
+  const OVERVIEW_KEY = 'sabonner.overview.v1';
+  const OVERVIEW_TTL = 20_000;
+  function cachedOverview() {
+    try {
+      const c = JSON.parse(store.get(OVERVIEW_KEY) || 'null');
+      return c && c.api === API && c.d && Number.isFinite(c.at) && c.at <= Date.now() ? c : null;
+    } catch { return null; }
+  }
+  let firstLoad = true;
   async function load(force = false) {
+    const first = firstLoad;
+    firstLoad = false;
+    if (first && !force) {
+      const c = cachedOverview();
+      if (c) {
+        state.data = c.d;
+        state.error = null;
+        lastSig = JSON.stringify({ ...c.d, now: 0 });
+        render();
+        // 还新鲜：本次刷新不请求；已过期：先显示旧数据，再往下去拉新的
+        if (Date.now() - c.at < OVERVIEW_TTL) { lastLoad = c.at; return; }
+      }
+    }
     lastLoad = Date.now();
     try {
-      const d = await api('/api/overview');
+      const d = await api('/api/overview', { fresh: force });
+      store.set(OVERVIEW_KEY, JSON.stringify({ api: API, at: Date.now(), d }));
       // 数据没变、而且还在同一分钟内（倒计时文字也不变）就不重绘，避免队徽闪一下
       const sig = JSON.stringify({ ...d, now: 0 });
       const same = sig === lastSig && !state.error && Math.floor(Date.now() / 60000) === lastPaint;

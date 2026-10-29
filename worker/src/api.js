@@ -63,7 +63,7 @@ function cached(key, build) {
   return build().then((body) => { memo.set(key, { at: Date.now(), body }); return body; });
 }
 const rawResponse = (body) => new Response(body, {
-  headers: { 'content-type': 'application/json; charset=utf-8', ...CORS, 'cache-control': 'public, max-age=20' },
+  headers: { 'content-type': 'application/json; charset=utf-8', ...CORS, 'cache-control': 'public, max-age=20, stale-while-revalidate=60' },
 });
 
 const pubSubs = (s) => ({
