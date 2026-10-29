@@ -7,7 +7,6 @@ compatibility_date = "2026-10-01"
 #   "* * * * *"   ：不用运行器，Worker 每分钟自己跑全部定时工作（受免费版 10ms CPU 限制，时效差一些）
 [triggers]
 crons = ["*/10 * * * *"]
-
 [[d1_databases]]
 binding = "DB"
 database_name = "sabonner"
