@@ -6,6 +6,7 @@
 //   赛后数据                                        每 RUNNER_STATS_EVERY 分钟（默认 15），比赛结束 20 分钟后开始，8 小时后放弃
 //   赛事列表（6 小时过期才请求）/ 清理                 每 30 / 60 分钟
 //   心跳（Worker 每 10 分钟检查一次，超过 15 分钟没有就给管理员发 Telegram）   每 5 分钟
+//   网页概览（/api/overview 的内容，内容变了才写进 D1；Worker 直接返回它，省掉现场组装的 CPU）  每轮直播轮询之后
 // 业务逻辑全部复用 worker/src（同一份代码），数据库通过 D1 的 HTTP 接口读写同一个 D1；网页和 Telegram 命令仍由 Worker 处理。
 //
 // 配置：仓库根目录的 .sabonner.env（init.sh 生成：bot token、管理员、Cloudflare token……）
@@ -56,6 +57,7 @@ export async function createRunner(cfg, deps = {}) {
   const { makeCtx } = await src('util.js');
   const engine = await src('engine.js');
   const { cleanup, setKVStmt } = await src('db.js');
+  const web = await src('api.js');   // 网页概览的生成代码
 
   const every = {
     tick: num(cfg.RUNNER_LIVE_EVERY, 60, 30, 300) * 1000,
@@ -68,6 +70,7 @@ export async function createRunner(cfg, deps = {}) {
     heartbeat: 5 * 60_000,
     summary: 60 * 60_000,
   };
+  every.snapshot = every.tick;
   const opts = { ...engine.WORKER_OPTS, budget: false, pre: 30 * 60, mapQuiet: 0, douyuEvery: every.douyu / 60_000, statsEvery: true, statsPerTick: 10 };
 
   // 被拦截 / 恢复时直接给管理员发 Telegram（不进发件队列：队列本身也要靠网络）
@@ -120,6 +123,7 @@ export async function createRunner(cfg, deps = {}) {
 
   const version = (() => { try { return execFileSync('git', ['-C', ROOT, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return '?'; } })();
   const last = {};               // 每项工作上次开始的时间
+  let lastSnap = null;           // 上次写进 D1 的概览，内容没变就不再上传
   const totals = { ticks: 0, errors: 0 };
   let lastLine = '';
 
@@ -139,6 +143,18 @@ export async function createRunner(cfg, deps = {}) {
     stats: async () => { const n = await engine.statsTick(newCtx()); return n ? `stats(${n})` : ''; },
     events: async () => { const n = await engine.eventsTick(newCtx()); return n != null ? `events(${n})` : ''; },
     cleanup: async () => { await cleanup(env.DB); return 'cleanup'; },
+    // 网页概览：和 Worker 现场生成的是同一份代码（api.js 的 overviewBody）。顺带查一下库里那份还在不在：
+    // 网页上改了订阅时 Worker 会删掉它（改由 Worker 现场生成），这时内容没变也要重新写
+    snapshot: async () => {
+      const db = env.DB;
+      const stmts = web.overviewStmts(db);
+      const res = await db.batch([...stmts, db.prepare('SELECT 1 AS x FROM kv WHERE k = ?').bind(web.SNAP_KEY)]);
+      const body = web.overviewBody(res.slice(0, stmts.length), env);
+      if (body === lastSnap && res[stmts.length].results.length) return '';
+      await db.batch([setKVStmt(db, web.SNAP_KEY, body)]);
+      lastSnap = body;
+      return `snapshot(${Math.round(body.length / 1024)}KB)`;
+    },
     heartbeat: async (t) => {
       const hb = { at: Math.floor(t / 1000), host: os.hostname(), ver: version, every: { live: every.tick / 1000, douyu: every.douyu / 60_000, refresh: every.refresh / 60_000 }, blocked: fetch.blocked?.() || [] };
       await env.DB.batch([setKVStmt(env.DB, 'runner', JSON.stringify(hb))]);
@@ -153,7 +169,7 @@ export async function createRunner(cfg, deps = {}) {
       return '';
     },
   };
-  const ORDER = ['tick', 'refresh', 'stats', 'events', 'cleanup', 'heartbeat', 'summary'];
+  const ORDER = ['tick', 'refresh', 'stats', 'events', 'snapshot', 'cleanup', 'heartbeat', 'summary'];
   // 这几项启动后先等一个间隔再跑（重启时不用把它们全做一遍）；直播轮询、赛程刷新、心跳启动时就跑
   const DEFER_FIRST = new Set(['stats', 'events', 'cleanup', 'summary']);
 

@@ -79,6 +79,7 @@ Cloudflare 免费版每次调用只有 10ms CPU，而且实测 cron 每分钟都
 | 赛后数据（比赛结束 20 分钟后开始查，8 小时后放弃） | 15 分钟 |
 | 赛事列表（6 小时过期才请求）/ 清理旧数据 | 30 / 60 分钟 |
 | 心跳（写进 D1；Worker 每 10 分钟检查，超过 15 分钟没有就给管理员发 Telegram，恢复后再发一条） | 5 分钟 |
+| 网页概览（`/api/overview` 的内容，和 Worker 生成的是同一份代码；内容变了才写进 D1 的 kv `snap_overview`，Worker 原样返回，打开 / 刷新网页时几乎不用 CPU。每轮多一次 D1 读取，约几百行） | 每轮直播轮询之后 |
 
 和只用 Worker 比：没有往返次数的限制，入队的消息马上发、所有接收人同一分钟收到；一张图开打后不再有 20 分钟的「不问」；斗鱼从 10 分钟一次变成 2 分钟一次。
 
@@ -356,3 +357,4 @@ node tools/profile.mjs --prof --cold
 - **自定义 emoji（如队徽贴纸）没有用上**：Telegram 只允许「创建者账号开了 Premium」的 bot（或绑定了 Fragment 用户名的 bot）发自定义 emoji，普通账号建的 bot 发不了。
 - 免费版每次调用 CPU 上限 10ms。订阅 C tier 会让 tier 那一路刷新的数据量变大，可能接近上限；如果日志里出现 `Exceeded CPU`（或 Sonde 上 sabonner 的 CPU P90 长期超过 10ms），先关掉 C tier（tier 那一格数据量最大）。
 - 网页接口（`/api/overview`、`/api/matches`）在 Worker 内存里缓存 20 秒，网页上的管理操作成功后立即清掉；TG 里改订阅后网页最多晚 20 秒看到。
+- 有运行器时，`/api/overview` 直接返回运行器写好的那份（见上面运行器的工作表）；运行器心跳超过 15 分钟、没有运行器、或网页上刚改完订阅（Worker 会删掉那份，运行器下一轮重新写）时，Worker 现场生成。
