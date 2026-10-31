@@ -7,3 +7,7 @@ node_modules/
 
 # VPS 运行器的设置
 .sabonner-runner.env
+
+# 本地测量工具的输出
+worker/tail*.json
+worker/tools/fixtures/

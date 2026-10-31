@@ -9,7 +9,7 @@
 #
 # 影响：推送会触发网页重新部署；Worker 每次都会重新部署一遍（幂等，订阅数据在 D1 里不受影响）；
 #       运行器每次都会重启（几秒钟，期间的轮询顺延到下一分钟）。
-# ==== 公共部分 v1（各仓库的 update.sh 里这一段完全相同，改的时候一起改）====
+# ==== 公共部分 v2（各仓库的 update.sh 里这一段完全相同，改的时候一起改）====
 [ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -euo pipefail
 SELF="$(readlink -f "$0")"
@@ -37,6 +37,8 @@ short() { git rev-parse --short HEAD; }
 # sync_repo [允许有改动的文件...]
 #   工作区有未提交的改动 → 退出（列出的生成文件除外）；本地和远端分叉 → 退出
 #   落后 → 快进拉取；领先 → 记在 AHEAD 里，由调用方决定推送还是只提示
+#   两边都有新提交（比如刚 git am 了补丁还没推送，另一台机器又推了提交）→ 自动把本地提交变基到远端之后，
+#   有冲突才停下（自动还原，什么都不改）
 #   拉取后如果 update.sh 自己变了，用新版本重新执行一遍
 AHEAD=0
 sync_repo() {
@@ -58,14 +60,23 @@ $bad"
   [[ -n "${UPDATE_REEXEC:-}" ]] && { ok "代码已同步（$br @ $(short)）"; return 0; }   # 刚刚已经同步过（新版本 update.sh 重新执行 / 根目录脚本调用）
   git fetch -q origin "$br" || die "git fetch 失败（网络不通，或远端没有 $br 分支）"
   read -r behind AHEAD < <(git rev-list --left-right --count "origin/$br...HEAD")
-  (( behind && AHEAD )) && die "本地和远端分叉了：本地多 $AHEAD 个提交，远端多 $behind 个。
-    手动处理：git pull --rebase，解决冲突后再运行本脚本"
   if (( behind )); then
     local before_self after_self old
     old=$(short)
     before_self=$(sha256sum "$SELF" | cut -c1-64)
-    git merge -q --ff-only "origin/$br"
-    ok "已拉取 $behind 个新提交：$old → $(short)"
+    if (( AHEAD )); then
+      # --autostash：允许有改动的生成文件（见调用方）先收起来，变基完再放回
+      if git rebase -q --autostash "origin/$br" >/dev/null 2>&1; then
+        ok "本地 $AHEAD 个还没推送的提交已经接到远端最新的 $behind 个提交之后（$old → $(short)）"
+      else
+        git rebase --abort >/dev/null 2>&1 || true
+        die "本地和远端分叉了（本地多 $AHEAD 个提交，远端多 $behind 个），自动变基有冲突，已还原。
+    手动处理：git pull --rebase，解决冲突后再运行本脚本"
+      fi
+    else
+      git merge -q --ff-only "origin/$br"
+      ok "已拉取 $behind 个新提交：$old → $(short)"
+    fi
     after_self=$(sha256sum "$SELF" 2>/dev/null | cut -c1-64 || true)
     if [[ "$before_self" != "$after_self" && -z "${UPDATE_REEXEC:-}" ]]; then
       warn "update.sh 本身也更新了，用新版本重新执行"

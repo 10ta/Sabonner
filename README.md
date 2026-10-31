@@ -82,7 +82,7 @@ Cloudflare 免费版每次调用只有 10ms CPU，而且实测 cron 每分钟都
 
 和只用 Worker 比：没有往返次数的限制，入队的消息马上发、所有接收人同一分钟收到；一张图开打后不再有 20 分钟的「不问」；斗鱼从 10 分钟一次变成 2 分钟一次。
 
-**安装**：不用额外的命令。第一次运行 `./init.sh`（或者已经部署过的话在终端里运行 `./update.sh`）时会问「定时工作放在哪里」：选 1 就是这台机器上的运行器（需要 systemd、Node.js 20+、root），接着问要不要走代理（填 `socks5://主机:端口`，直连输入 `-`）。之后脚本会：生成 `.sabonner-runner.env`（运行器设置，已加入 `.gitignore`）→ 运行器自检（D1、Telegram、bo3、斗鱼能不能通，不通就停下，线上保持原样）→ 部署 Worker（cron 改成每 10 分钟只检查心跳）→ 安装并启动 systemd 服务 `sabonner-runner`（开机自启）。选择记在 `.sabonner.env` 的 `RUNNER`（`vps` / `worker`），以后 `./update.sh` 不再问，每次都先自检、部署完再重启运行器。
+**安装**：不用额外的命令。第一次运行 `./init.sh`（或者已经部署过的话在终端里运行 `./update.sh`）时会问「定时工作放在哪里」：选 1 就是这台机器上的运行器（需要 systemd、Node.js 20+、root），接着问要不要走代理（填 `socks5://主机:端口`，直连输入 `-`）。之后脚本会：生成 `.sabonner-runner.env`（运行器设置，已加入 `.gitignore`）→ 运行器自检（D1、Telegram、bo3、斗鱼能不能通，不通就停下，线上保持原样）→ 部署 Worker（cron 改成每 10 分钟只检查心跳）→ 安装并启动 systemd 服务 `sabonner-runner`（开机自启）。另一台机器上已经装了运行器、这台只用来部署的话选 3（`remote`：cron 同样改成每 10 分钟检查心跳，本机不装运行器）。选择记在 `.sabonner.env` 的 `RUNNER`（`vps` / `worker` / `remote`），以后 `./update.sh` 不再问，每次都先自检、部署完再重启运行器。
 
 - 读写 D1 用 `.sabonner.env` 里保存的 Cloudflare token（`init.sh` 用 API token 方式登录时保存的那个，带 D1 编辑权限）；用浏览器登录的没有保存 token，脚本会让你另外粘贴一个（只要「Account · D1 · Edit」权限），存在 `.sabonner-runner.env` 的 `RUNNER_CF_TOKEN`。
 - 代理、各项间隔都在 `.sabonner-runner.env` 里，改完 `systemctl restart sabonner-runner`。

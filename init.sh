@@ -133,6 +133,7 @@ ok "时区 $TZ_NAME"
 # ---------- 3b. 定时工作放在哪里 ----------
 # RUNNER=vps：这台机器上的运行器（runner/，systemd 服务 sabonner-runner），Worker 的 cron 每 10 分钟只检查运行器的心跳
 # RUNNER=worker：Worker 每分钟的 cron 自己跑全部定时工作
+# RUNNER=remote：运行器装在另一台机器上，这台只用来部署（cron 同样是每 10 分钟检查心跳，本机不装运行器）
 # 选择存在 .sabonner.env 的 RUNNER；想换的话把那一行清空（RUNNER=），再运行 ./update.sh 或 ./init.sh 会重新问
 RUNNER_ENV="$ROOT/.sabonner-runner.env"
 UNIT=/etc/systemd/system/sabonner-runner.service
@@ -150,7 +151,7 @@ runner_set() {   # 键 值：改 .sabonner-runner.env 里的这一行（没有�
 set_crons() {
   VAL="$1" node -e '
     const fs = require("fs"); const f = "wrangler.toml"; const s = fs.readFileSync(f, "utf8");
-    const re = /^crons\s*=\s*\[.*\]\s*$/m;
+    const re = /^crons[ \t]*=[ \t]*\[.*\][ \t]*$/m;   // 只匹配这一行（\s 会吃掉后面的空行）
     if (!re.test(s)) { console.error("wrangler.toml 里没有 crons"); process.exit(1); }
     fs.writeFileSync(f, s.replace(re, `crons = ["${process.env.VAL}"]`));'
 }
@@ -163,11 +164,12 @@ if (( RESET )) || [[ -z "$RUNNER" ]]; then
   1) 放在这台机器上的运行器（推荐）：直播每分钟更新、消息马上发，Cloudflare 上几乎不耗 CPU。
      需要 systemd、root，这台机器要一直开着；它停了推送就停（Worker 会发 Telegram 提醒你）
   2) 放在 Cloudflare Worker 的每分钟 cron：不依赖这台机器，但受免费版每次 10ms CPU 的限制，比分和推送会慢几分钟
+  3) 运行器已经装在另一台机器上了，这台只用来部署（不在这里装运行器）
 EOF
-    case "$(ask '选 1 还是 2 [1]：')" in 2) RUNNER=worker ;; *) RUNNER=vps ;; esac
+    case "$(ask '选 1、2 还是 3 [1]：')" in 2) RUNNER=worker ;; 3) RUNNER=remote ;; *) RUNNER=vps ;; esac
     NEW_RUNNER=1
   else
-    warn "没有终端可以提问：这次先按 Worker cron 部署。在终端里运行 ./update.sh 或 ./init.sh 时会问定时工作放在哪里"
+    warn "没有终端可以提问：这次不改定时工作的方式（cron 保持 wrangler.toml 里现在的设置）。在终端里运行 ./update.sh 或 ./init.sh 时会问"
   fi
 fi
 
@@ -201,11 +203,16 @@ EOF
   proxy="$(runner_get RUNNER_PROXY)"
   set_crons "*/10 * * * *"
   ok "定时工作：这台机器上的运行器（代理：${proxy:-直连}；其余设置在 .sabonner-runner.env）"
-else
-  set_crons "* * * * *"
-  ok "定时工作：Worker 每分钟的 cron"
+elif [[ "$RUNNER" == remote || "$RUNNER" == worker ]]; then
+  if [[ "$RUNNER" == remote ]]; then
+    set_crons "*/10 * * * *"
+    ok "定时工作：另一台机器上的运行器（这台只部署；Worker 每 10 分钟检查一次运行器的心跳）"
+  else
+    set_crons "* * * * *"
+    ok "定时工作：Worker 每分钟的 cron"
+  fi
   if [[ -f "$UNIT" ]]; then
-    [[ $EUID -eq 0 ]] || die "这台机器上装着运行器，换成 Worker cron 要先停掉它，需要 root 运行"
+    [[ $EUID -eq 0 ]] || die "这台机器上装着运行器，换方式要先停掉它，需要 root 运行"
     systemctl disable --now -q sabonner-runner 2>/dev/null || true
     rm -f "$UNIT"; systemctl daemon-reload
     ok "已停止并移除运行器服务（.sabonner-runner.env 留着，以后换回来还能用）"
@@ -386,7 +393,7 @@ ${G}${B}部署完成${N}
   /team spirit     搜索并订阅队伍
   /room 6657       添加斗鱼主播
 
-定时工作：  $([[ "$RUNNER" == vps ]] && echo "这台机器上的运行器（日志：journalctl -u sabonner-runner -f）" || echo "Worker 每分钟的 cron")
+定时工作：  $(case "$RUNNER" in vps) echo "这台机器上的运行器（日志：journalctl -u sabonner-runner -f）" ;; remote) echo "另一台机器上的运行器" ;; worker) echo "Worker 每分钟的 cron" ;; *) echo "还没选（在终端里运行 ./update.sh 会问）" ;; esac)
 看实时日志：  cd worker && npx wrangler tail
 以后更新：    ./update.sh
 
