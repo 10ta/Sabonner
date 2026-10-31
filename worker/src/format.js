@@ -4,7 +4,7 @@
 //   赛事行   🟥 S  ESL Pro League Season 24        tier 色块和网页一致：S 红 / A 橙 / B 蓝 / C 绿
 //   信息行   decider / 3rd place · 💰 $1M · 🏟 LAN · ★★★★   （赛段斜体，链接到 bo3 赛段页）
 //   对阵     放在引用块里（左侧色条），比分、时间用等宽字体
-//   ⭐ 订阅的队伍   🤖2:1 AI 预测的胜者和比分（结束后带 ✅ / ❌）   🏆 胜者
+//   ⭐ 订阅的队伍   🤖2:1 AI 预测的胜者和比分（结束后带 ✅ 全中 / ☑️ 胜负对、比分错 / ❌ 没中）   🏆 胜者
 
 import { esc, fmtTime, fmtDate, fmtClock, fmtDur, now, fmtMD } from './util.js';
 import { matchUrl, stagesUrl, flag } from './bo3.js';
@@ -29,7 +29,7 @@ const starsText = (n) => (n > 0 ? '★'.repeat(n) : '');
 // ---------- 队伍 ----------
 
 // stars：订阅队伍 id 集合，命中时前面加 ⭐
-// ai：false 不标；true 只标 🤖；'score' 带预测比分「🤖2:0」；'verdict' 结束后再带 ✅/❌
+// ai：false 不标；true 只标 🤖；'score' 带预测比分「🤖2:0」；'verdict' 结束后再带 ✅ / ☑️ / ❌
 const aiScore = (m, side) => (m.ai_s1 != null && m.ai_s2 != null ? (side === 1 ? `${m.ai_s1}:${m.ai_s2}` : `${m.ai_s2}:${m.ai_s1}`) : '');
 const winnerSide = (m) => {
   if (m.winner_id && m.winner_id === m.team1_id) return 1;
@@ -46,7 +46,11 @@ const teamTag = (m, side, stars, ai = false) => {
   if (ai && m.ai_winner_id && m.ai_winner_id === id) {
     mark = ' 🤖';
     if (ai !== true) mark += aiScore(m, side);
-    if (ai === 'verdict' && winnerSide(m)) mark += winnerSide(m) === side ? '✅' : '❌';
+    if (ai === 'verdict' && winnerSide(m)) {
+      // ✅ 胜负和比分都对；☑️ 胜负对、比分不对；❌ 胜负错（只预测了胜者时猜中就算全对）
+      const exact = m.ai_s1 == null || m.ai_s2 == null || (Number(m.ai_s1) === Number(m.s1) && Number(m.ai_s2) === Number(m.s2));
+      mark += winnerSide(m) !== side ? '❌' : exact ? '✅' : '☑️';
+    }
   }
   return `${stars?.has(id) ? '⭐' : ''}${f ? f + ' ' : ''}<b>${esc(name || 'TBD')}</b>${rank ? ` <i>#${rank}</i>` : ''}${mark}`;
 };

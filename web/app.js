@@ -189,19 +189,26 @@
   const fmtPrize = (n) => (!n ? '' : n >= 1e6 ? `$${+(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `$${+(n / 1e3).toFixed(1)}K` : `$${n}`);
   const starRow = (n) => `<span class="stars" title="bo3 星级 ${n}/5">${'<b>★</b>'.repeat(n)}${'<i>★</i>'.repeat(5 - n)}</span>`;
 
-  // AI 预测：挂在预测胜者队徽左上角的小标「AI 2:0」（比分按预测胜者的视角）；
-  // 比赛结束后猜中变绿、没猜中变红并划掉
+  // AI 预测：挂在预测胜者队徽左上角的小标「AI 2:0」（比分按预测胜者的视角）。比赛结束后三种结果：
+  //   exact 胜负和比分都对（绿）· winner 胜负对、比分不对（黄，比分划掉）· miss 胜负都错（红，划掉）
   function aiVerdict(m) {
     if (!m.ai || m.status !== 'finished') return null;
     const w = m.winner_id || (m.s1 !== m.s2 ? (m.s1 > m.s2 ? m.team1_id : m.team2_id) : null);
-    return w ? w === m.ai.winner_id : null;
+    if (!w) return null;
+    if (w !== m.ai.winner_id) return 'miss';
+    if (m.ai.s1 == null || m.ai.s2 == null) return 'exact'; // 只预测了胜者：猜中就算全对
+    return Number(m.ai.s1) === Number(m.s1) && Number(m.ai.s2) === Number(m.s2) ? 'exact' : 'winner';
   }
+  const AI_CLASS = { exact: ' ai-ok', winner: ' ai-half', miss: ' ai-miss' };
+  const AI_TEXT = { exact: '胜负和比分都猜中', winner: '猜中胜负，比分没中', miss: '没猜中' };
+  const AI_MARK = { exact: '✓', winner: '½', miss: '✗' };
+  const aiScoreOf = (m, side) => (m.ai.s1 != null && m.ai.s2 != null ? (side === 1 ? `${m.ai.s1}:${m.ai.s2}` : `${m.ai.s2}:${m.ai.s1}`) : '');
   function aiTag(m, side) {
-    const sc = m.ai.s1 != null && m.ai.s2 != null ? (side === 1 ? `${m.ai.s1}:${m.ai.s2}` : `${m.ai.s2}:${m.ai.s1}`) : '';
+    const sc = aiScoreOf(m, side);
     const v = aiVerdict(m);
     const name = side === 1 ? m.team1 : m.team2;
-    const tip = `AI 预测 ${name}${sc ? ' ' + sc : ''} 胜${v === true ? ' · 猜中' : v === false ? ' · 没猜中' : ''}`;
-    return `<i class="ai-tag${v === true ? ' ai-ok' : v === false ? ' ai-miss' : ''}" title="${esc(tip)}">AI${sc ? `<span>${sc}</span>` : ''}</i>`;
+    const tip = `AI 预测 ${name}${sc ? ' ' + sc : ''} 胜${v ? ' · ' + AI_TEXT[v] : ''}`;
+    return `<i class="ai-tag${AI_CLASS[v] || ''}" title="${esc(tip)}">AI${sc ? `<span>${sc}</span>` : ''}</i>`;
   }
 
   // 头部第二行：赛段 · 奖金 · LAN · 星级 · HLTV
@@ -290,8 +297,9 @@
       const f = flag(side === 1 ? m.team1_cc : m.team2_cc);
       const rank = side === 1 ? m.team1_rank : m.team2_rank;
       const won = side === 1 ? w1 : !w1;
-      const ai = m.ai && m.ai.winner_id === id && v != null
-        ? `<i class="ai-tag ${v ? 'ai-ok' : 'ai-miss'}" title="AI 预测 ${esc(name)} 胜 · ${v ? '猜中' : '没猜中'}">AI${v ? '✓' : '✗'}</i>` : '';
+      const sc = m.ai && m.ai.winner_id === id ? aiScoreOf(m, side) : '';
+      const ai = m.ai && m.ai.winner_id === id && v
+        ? `<i class="ai-tag${AI_CLASS[v]}" title="AI 预测 ${esc(name)}${sc ? ' ' + sc : ''} 胜 · ${AI_TEXT[v]}">AI${AI_MARK[v]}</i>` : '';
       return `<span class="res-team${won ? ' win' : ' lose'}${stars.has(id) ? ' star' : ''}">
         <span class="res-logo${logo ? '' : ' no-img'}">${logo ? `<img src="${esc(logo)}" alt="" data-logo loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode('${esc(initials(name))}'))">` : esc(initials(name))}</span>
         <span class="res-name">${f ? `<span class="flag">${f}</span>` : ''}<span class="nm">${esc(name)}</span>${rank ? `<span class="rank">#${rank}</span>` : ''}${ai}</span>
@@ -339,10 +347,12 @@
 
   // ---------- 队徽可读性 ----------
   // 透明底的队徽放在卡片底色上可能看不清（浅色主题里的黄色 / 浅绿队徽，深色主题里的黑色队徽）。
-  // 和 Liquipedia 一样：算队徽像素和背景的对比度，大部分都看不清时，浅色主题画成全黑、深色主题画成全白。
+  // 和 Liquipedia 一样：算队徽像素和背景的对比度，整个队徽都看不清时，浅色主题画成全黑、深色主题画成全白。
+  // 只要有一部分对比很清楚（比如 NAVI 黄底上的黑字、黑色描边），轮廓和细节就认得出来，保持原色——
+  // 以前按「看得清的面积不到 35%」判断，NAVI 这种大面积黄色、细节是黑色的队徽在浅色主题下被涂成了全黑。
   // 读像素需要图片允许跨域：先直接读，不行就经 Worker 的 /img 中转（只放行 bo3 的图片域名）。
   // 结果按「背景色 + 图片地址」存在本机，每个队徽在每套配色下只算一次。
-  const LOGO_KEY = 'sabonner.logo.v1';
+  const LOGO_KEY = 'sabonner.logo.v2'; // 判断规则改过，旧结果作废
   let logoMemo = {};
   try { logoMemo = JSON.parse(store.get(LOGO_KEY) || '{}'); } catch { logoMemo = {}; }
   const logoJobs = new Map();
@@ -388,7 +398,7 @@
     c.drawImage(im, (N - w) / 2, (N - h) / 2, w, h);
     const d = c.getImageData(0, 0, N, N).data; // 跨域读不了会在这里抛错
     const bgL = lum(...bg);
-    let cover = 0, good = 0;
+    let cover = 0, good = 0, strong = 0;
     for (let i = 0; i < d.length; i += 4) {
       const a = d[i + 3] / 255;
       if (a < 0.1) continue;
@@ -397,10 +407,12 @@
       const ratio = (Math.max(L, bgL) + 0.05) / (Math.min(L, bgL) + 0.05);
       cover += a;
       if (ratio >= 1.8) good += a;
+      if (ratio >= 3) strong += a;
     }
     if (!cover) return false;
     if (cover / (N * N) > 0.85) return false; // 自带底色的方形队徽，本来就看得清
-    return good / cover < 0.35; // 看得清的部分不到 35%
+    if (strong / cover >= 0.1) return false;  // 至少一成是清楚的（文字、描边），认得出来
+    return good / cover < 0.35;               // 其余情况：看得清的部分不到 35% 才改成单色
   }
   async function verdict(src, bg) {
     const key = `${bg.join(',')}|${src}`;
@@ -474,7 +486,7 @@
       <div class="dt-head"><span class="tier tier-${esc(tier)}">${esc(tier.toUpperCase() || '?')}</span>
         <span class="tour"><span class="tour-name">${esc(m.tournament || '')}</span>${tourSub(m)}</span></div>
       <div class="dt-score">${team(1)}<b>${m.s1}<i>:</i>${m.s2}</b>${team(2)}</div>
-      ${m.ai && v != null ? `<p class="dt-ai"><i class="ai-tag ${v ? 'ai-ok' : 'ai-miss'}">AI</i> 预测 ${esc(m.ai.winner_id === m.team1_id ? m.team1 : m.team2)} ${m.ai.winner_id === m.team1_id ? `${m.ai.s1}:${m.ai.s2}` : `${m.ai.s2}:${m.ai.s1}`} · ${v ? '猜中' : '没猜中'}</p>` : ''}
+      ${m.ai && v ? `<p class="dt-ai"><i class="ai-tag${AI_CLASS[v]}">AI${AI_MARK[v]}</i> 预测 ${esc(m.ai.winner_id === m.team1_id ? m.team1 : m.team2)} ${aiScoreOf(m, m.ai.winner_id === m.team1_id ? 1 : 2)} 胜 · ${AI_TEXT[v]}</p>` : ''}
       <h3 class="dt-h">地图</h3>
       ${maps.length ? `<div class="maps dt-maps">${maps.map((g) => {
         const win = g.side === 1 ? m.team1 : g.side === 2 ? m.team2 : g.winner || '';

@@ -53,6 +53,9 @@
      glare; outer frames, header and buttons keep full ink. Re-derived on each surface below. */
   --line-mix: 62%;
   --line: var(--black);
+  /* Outer frames (cards, buttons, chips, header rule). Light schemes: full ink, the 1999 look.
+     Dark schemes override it with a dimmed ink, see below. */
+  --frame: var(--black);
   --shadow-offset: 6px;
   --space-step: 0.75rem;
 }
@@ -122,7 +125,11 @@
   --chart-label: var(--text-muted);
   --strip-line: color-mix(in srgb, var(--black) 40%, var(--card-bg));
   --row-hover: color-mix(in srgb, var(--accent) 10%, transparent);
-  --line-mix: 55%;
+  /* Light ink on dark paper glows: full-ink 3-4px frames measured 9-12:1 against the cards while muted
+     text sat at 4.7-6.8:1 and inner lines at ~4.3:1, so the grid out-shouted the content. Frames drop to
+     ~3:1 (2.7-3.2:1 across the dark palettes), inner lines to ~2:1; text keeps full ink, so content reads first. */
+  --frame: color-mix(in srgb, var(--ink) 40%, var(--paper));
+  --line-mix: 25%;
 
   --sig-1: var(--accent-green);
   --sig-2: color-mix(in srgb, var(--accent-green) 55%, var(--accent-yellow));
@@ -337,7 +344,7 @@
 
 /* Dark schemes: hard shadows take a dim tint of the accent so cards keep their offset depth. */
 [data-scheme$="-dark"] {
-  --shadow: color-mix(in srgb, var(--accent) 38%, var(--bg));
+  --shadow: color-mix(in srgb, var(--accent) 28%, var(--bg));
 }
 
 /* Dark schemes: the footer is an ink block in light themes; keep it a dark band here. */
@@ -352,6 +359,8 @@
 .header {
   --text-muted: var(--on-accent);
 }
+/* Frames inside the header follow the header's own ink (it redefines --black per scheme). */
+.header, .footer { --frame: var(--black); }
 
 [data-scheme$="-dark"] .header {
   --black: var(--on-accent);
