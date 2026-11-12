@@ -26,6 +26,7 @@ const HELP_PUBLIC = [
   '/results 最近赛果',
   '/subs 当前订阅的队伍和 tier',
   '/rooms 斗鱼主播状态',
+  '/cal 日历订阅地址',
   '/stop 不再接收推送',
 ].join('\n');
 
@@ -44,11 +45,11 @@ const HELP_OWNER = [
 
 export const PUBLIC_COMMANDS = [
   ['today', '今明两天赛程'], ['next', '即将开始的比赛'], ['live', '正在进行的比赛'], ['results', '最近赛果'],
-  ['subs', '订阅的队伍和 tier'], ['rooms', '斗鱼主播状态'], ['help', '帮助'], ['stop', '不再接收推送'],
+  ['subs', '订阅的队伍和 tier'], ['rooms', '斗鱼主播状态'], ['cal', '日历订阅地址'], ['help', '帮助'], ['stop', '不再接收推送'],
 ];
 export const OWNER_COMMANDS = [
   ['today', '今明两天赛程'], ['next', '即将开始的比赛'], ['live', '正在进行的比赛'], ['results', '最近赛果'],
-  ['subs', '订阅'], ['rooms', '斗鱼主播'], ['team', '搜索/管理队伍'], ['tier', '切换 tier'],
+  ['subs', '订阅'], ['rooms', '斗鱼主播'], ['cal', '日历订阅地址'], ['team', '搜索/管理队伍'], ['tier', '切换 tier'],
   ['stars', '按星级订阅'], ['room', '添加/管理斗鱼房间'], ['users', '用户审批'], ['refresh', '刷新赛程'], ['status', '运行状态'], ['help', '帮助'],
 ];
 
@@ -111,6 +112,8 @@ export async function handleUpdate(ctx, update) {
       return reply(await subsText(env.DB));
     case 'rooms':
       return reply(await roomsText(env.DB));
+    case 'cal':
+      return reply(calText(ctx.origin));
     case 'stop':
       if (owner) return reply('你是管理员，推送无法关闭。');
       await env.DB.batch([
@@ -153,6 +156,17 @@ async function subsText(db) {
   const teams = s.teams.length ? s.teams.map((t) => `${flag(t.cc)}${flag(t.cc) ? ' ' : ''}${esc(t.name)}`).join('、') : '无';
   const stars = s.stars ? `${'★'.repeat(s.stars)} 及以上` : '无';
   return `<b>订阅</b>（三项任一命中就推送）\nTier：${tiers}\n星级：${stars}\n队伍：${teams}`;
+}
+
+// 日历订阅地址（.ics）。Telegram 里 webcal:// 链接点不了，所以给可以点一下复制的 https 地址
+export function calText(origin) {
+  if (!origin) return '日历订阅地址暂时拿不到，去网页「赛程」旁的「订阅日历」里复制。';
+  return [
+    '📅 <b>日历订阅</b>',
+    `<code>${esc(origin)}/api/calendar.ics</code>`,
+    '点一下复制，在日历应用里选「添加订阅日历 / 通过 URL 添加」粘贴进去。订阅范围内的比赛会出现在日历里，改期、出比分后同一个事件跟着更新。',
+    '<i>多久更新一次由日历应用决定：苹果日历最短 5 分钟，Google 日历通常 12–24 小时。实时比分还是看这里的推送和网页。</i>',
+  ].join('\n');
 }
 
 async function roomsText(db) {

@@ -256,7 +256,7 @@ async function writeStmts(ctx, map, subs, byTeam) {
       // 库里还是「未开始」，bo3 已经在打了（bo3 把开赛时间改早了，比如开打时改成实际开始时间，直播轮询按旧时间还没轮到）：
       // 只改状态和开赛时间，交给直播轮询接手，比分仍由它去对比、发卡片
       else if (old.status === 'upcoming') {
-        stmts.push(db.prepare("UPDATE matches SET status = 'current', start_ts = ? WHERE id = ? AND status = 'upcoming'").bind(m.start_ts, m.id));
+        stmts.push(db.prepare("UPDATE matches SET status = 'current', start_ts = ?, updated_at = ? WHERE id = ? AND status = 'upcoming'").bind(m.start_ts, now(), m.id));
       }
       continue;
     }
@@ -496,7 +496,7 @@ export async function liveTick(ctx, minute, results, claimed = null) {
     const f = fresh.get(old.id);
     if (!f) {
       // bo3 上找不到了（取消 / 删除），开赛 6 小时后放弃跟踪
-      if (old.start_ts < t - 6 * 3600) stmts.push(db.prepare("UPDATE matches SET status = 'missing' WHERE id = ?").bind(old.id));
+      if (old.start_ts < t - 6 * 3600) stmts.push(db.prepare("UPDATE matches SET status = 'missing', updated_at = ? WHERE id = ?").bind(t, old.id));
       continue;
     }
 
@@ -599,7 +599,7 @@ export async function statsTick(ctx) {
       if (stats?.length) {
         const maps = (f.maps || []).filter((g) => g.sc1 != null).length >= (old.maps || []).filter((g) => g.sc1 != null).length ? f.maps : old.maps;
         const m = { ...old, maps, stats };
-        stmts.push(db.prepare('UPDATE matches SET stats = ?, maps = ? WHERE id = ?').bind(JSON.stringify(stats), JSON.stringify(maps || []), old.id));
+        stmts.push(db.prepare('UPDATE matches SET stats = ?, maps = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(stats), JSON.stringify(maps || []), now(), old.id));
         to ??= await toOf(ctx);
         items.push(...fanout(to, 'end_edit', endMsg(m), m.id));
         continue;

@@ -395,6 +395,11 @@ input:focus { box-shadow: 3px 3px 0 var(--accent); }
 .dialog p { font-size: 0.85rem; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
 .form-error { color: var(--accent-red); font-weight: 700; }
+/* 日历订阅 */
+.cal-open { display: flex; align-items: center; justify-content: center; text-decoration: none; }
+.cal-label { font-size: 0.8rem; font-weight: 700; }
+.cal-row { display: flex; gap: 0.5rem; }
+.cal-row input { flex: 1; min-width: 0; font-size: 0.8rem; }
 
 .toast {
   position: fixed; left: 50%; bottom: 1.5rem; transform: translateX(-50%);

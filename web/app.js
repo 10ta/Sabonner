@@ -836,6 +836,31 @@
     adminAction(() => api('/api/admin/rooms', { admin: true, method: 'POST', body: { room } }), '已添加');
   });
 
+  // ---------- 日历订阅 ----------
+  // 地址是 Worker 的 /api/calendar.ics；webcal:// 是同一个地址换了协议，点一下直接唤起日历应用
+  const calDlg = $('#cal');
+  const calUrl = `${API || location.origin}/api/calendar.ics`;
+  $('#btn-cal').addEventListener('click', () => {
+    $('#cal-url').value = calUrl;
+    $('#cal-webcal').href = calUrl.replace(/^https?:/, 'webcal:');
+    calDlg.showModal();
+  });
+  $('#cal-url').addEventListener('focus', (e) => e.target.select());
+  $('#cal-copy').addEventListener('click', async () => {
+    const input = $('#cal-url');
+    try {
+      await navigator.clipboard.writeText(calUrl);
+    } catch {
+      // 没有剪贴板权限（非 https、旧浏览器）：选中文字，用老办法复制
+      input.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch { /* 忽略 */ }
+      if (!ok) { toast('复制失败，请手动复制地址', true); return; }
+    }
+    toast('已复制订阅地址');
+  });
+  calDlg.addEventListener('click', (e) => { if (e.target === calDlg) calDlg.close(); }); // 点遮罩关闭
+
   // ---------- 登录 ----------
   const dlg = $('#login');
   $('#btn-admin').addEventListener('click', () => {

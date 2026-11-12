@@ -1,6 +1,7 @@
 // 网页用的接口
 //   GET  /api/overview                公开：赛程 / 进行中 / 赛果 / 订阅 / 主播
 //   GET  /api/matches?scope=...       公开
+//   GET  /api/calendar.ics            公开：日历订阅（内容见 ics.js）
 //   /api/admin/*                      需要 Authorization: Bearer <ADMIN_TOKEN>
 //     GET    me                       校验密码
 //     GET    teams/search?q=          搜索队伍
@@ -21,6 +22,7 @@ import { roomInfo } from './douyu.js';
 import { refreshSchedule, eventsTick } from './engine.js';
 import { addTeam, addRoom } from './bot.js';
 import { sendMessage } from './tgapi.js';
+import { ICS_KEY, icsStmts, icsFrom } from './ics.js';
 
 const TIERS = ['s', 'a', 'b', 'c'];
 
@@ -95,7 +97,14 @@ export async function handleApi(req, env, path, ctx) {
     }));
   }
   if (path === '/api/overview') {
-    return rawResponse(await cached('overview', async () => withNow(await readSnapshot(db) ?? await buildOverview(db, env))));
+    return rawResponse(await cached('overview', async () => withNow(await readSnapshot(db, SNAP_KEY, '{"') ?? await buildOverview(db, env))));
+  }
+  // 日历订阅：有运行器时原样返回它写好的那份，否则现场生成（只是字符串拼接）。日历应用几分钟到几小时才来拉一次
+  if (path === '/api/calendar.ics') {
+    const body = await cached('ics', async () => await readSnapshot(db, ICS_KEY, 'BEGIN:VCALENDAR') ?? icsFrom(await db.batch(icsStmts(db))));
+    return new Response(body, {
+      headers: { 'content-type': 'text/calendar; charset=utf-8', 'cache-control': 'public, max-age=300', 'content-disposition': 'inline; filename="sabonner.ics"', ...CORS },
+    });
   }
   return json({ error: 'not found' }, 404);
 }
@@ -144,18 +153,18 @@ export async function buildOverview(db, env) {
 
 const withNow = (body) => `{"now":${now()},${body.slice(1)}`;
 
-// 运行器生成的那份；运行器心跳过期或没有时返回 null
-async function readSnapshot(db) {
-  const { results } = await db.prepare('SELECT k, v FROM kv WHERE k IN (?, ?)').bind(SNAP_KEY, 'runner').all();
-  const snap = results.find((r) => r.k === SNAP_KEY)?.v;
+// 运行器生成的那份（key：snap_overview / snap_ics；prefix：内容应有的开头）；运行器心跳过期或没有时返回 null
+async function readSnapshot(db, key, prefix) {
+  const { results } = await db.prepare('SELECT k, v FROM kv WHERE k IN (?, ?)').bind(key, 'runner').all();
+  const snap = results.find((r) => r.k === key)?.v;
   const hb = results.find((r) => r.k === 'runner')?.v;
-  if (typeof snap !== 'string' || !snap.startsWith('{"') || !hb) return null;
+  if (typeof snap !== 'string' || !snap.startsWith(prefix) || !hb) return null;
   const at = Number((hb.match(/"at":(\d+)/) || [])[1]) || 0;   // 心跳是一小段 JSON，取 at 不用整个解析
   return now() - at <= SNAP_STALE ? snap : null;
 }
 
-// 改了订阅 / 房间 / 用户：删掉运行器那份，网页立即看到 Worker 现场生成的新数据；运行器下一轮（≤ 1 分钟）发现没了会重新写
-const dropSnapshot = (db) => db.prepare('DELETE FROM kv WHERE k = ?').bind(SNAP_KEY).run();
+// 改了订阅 / 房间 / 用户：删掉运行器那两份（概览、日历），立即看到 Worker 现场生成的新数据；运行器下一轮（≤ 1 分钟）发现没了会重新写
+const dropSnapshot = (db) => db.prepare('DELETE FROM kv WHERE k IN (?, ?)').bind(SNAP_KEY, ICS_KEY).run();
 
 async function handleAdmin(req, env, sub, ctx) {
   const auth = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');

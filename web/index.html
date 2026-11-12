@@ -65,7 +65,7 @@
     </section>
 
     <section class="section" id="sec-upcoming" tabindex="-1" aria-labelledby="h-upcoming">
-      <div class="sec-head"><h2 id="h-upcoming">赛程</h2><span class="sec-count" id="sc-upcoming"></span></div>
+      <div class="sec-head"><h2 id="h-upcoming">赛程</h2><span class="sec-count" id="sc-upcoming"></span><span class="sec-note"><button class="sec-more" id="btn-cal" type="button" aria-haspopup="dialog">订阅日历</button></span></div>
       <div id="upcoming-body"></div>
     </section>
 
@@ -104,6 +104,24 @@
       <div class="dialog-actions">
         <button type="button" class="btn" id="login-cancel">取消</button>
         <button type="submit" class="btn btn-primary">登录</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 日历订阅：webcal 链接（点一下唤起日历应用）+ 可复制的 https 地址 -->
+  <dialog class="dialog" id="cal" aria-labelledby="cal-title">
+    <form method="dialog">
+      <h2 id="cal-title">订阅日历</h2>
+      <p class="muted">订阅范围内的比赛会出现在你的日历应用里；改期、开打、出比分后，同一个事件跟着更新。</p>
+      <a class="btn btn-primary cal-open" id="cal-webcal" href="#">在日历应用中打开</a>
+      <label class="cal-label" for="cal-url">或者复制地址，在日历应用里选「添加订阅日历 / 通过 URL 添加」</label>
+      <div class="cal-row">
+        <input type="text" id="cal-url" readonly>
+        <button type="button" class="btn" id="cal-copy">复制</button>
+      </div>
+      <p class="muted">多久更新一次由日历应用决定：苹果日历最短 5 分钟，Google 日历通常 12–24 小时，Outlook 几小时。实时比分请看这个网页或 Telegram。</p>
+      <div class="dialog-actions">
+        <button type="submit" class="btn">关闭</button>
       </div>
     </form>
   </dialog>

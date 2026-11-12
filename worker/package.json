@@ -6,7 +6,8 @@
     "dev": "wrangler dev --test-scheduled",
     "deploy": "wrangler deploy",
     "db:migrate": "wrangler d1 migrations apply sabonner --remote",
-    "logs": "wrangler tail"
+    "logs": "wrangler tail",
+    "test": "node --test"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

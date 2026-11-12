@@ -1,7 +1,7 @@
 // Sabonner Worker 入口
 //   POST /tg        Telegram webhook（校验 secret header）
 //   GET  /setup     注册 webhook 和命令菜单（需要 ?token=ADMIN_TOKEN）
-//   GET  /api/*     网页用的只读接口；/api/admin/* 需要 Authorization: Bearer ADMIN_TOKEN
+//   GET  /api/*     网页用的只读接口（含日历订阅 /api/calendar.ics）；/api/admin/* 需要 Authorization: Bearer ADMIN_TOKEN
 //   GET  /relay     VPS 运行器的备用出口：运行器直连 bo3 / 斗鱼被拦截时经这里转发（需要 x-relay-key: ADMIN_TOKEN，只放行这两个站）
 //   cron            每 10 分钟：检查 VPS 运行器的心跳（watch.js）；改成每分钟（"* * * * *"）就是不用运行器、由 Worker 自己跑（engine.js）
 
@@ -27,7 +27,9 @@ export default {
       const update = await req.json().catch(() => null);
       if (update) {
         // 先回 200 给 Telegram，处理放到后台，避免慢请求导致 Telegram 重发
-        execCtx.waitUntil(handleUpdate(makeCtx(env), update).catch((e) => console.error('[tg]', e?.stack || e)));
+        const ctx = makeCtx(env);
+        ctx.origin = url.origin; // /cal 回的订阅地址
+        execCtx.waitUntil(handleUpdate(ctx, update).catch((e) => console.error('[tg]', e?.stack || e)));
       }
       return new Response('ok');
     }

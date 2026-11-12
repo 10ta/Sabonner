@@ -245,6 +245,17 @@ for (let k = 0; k < 6; k++) {
 }
 say(`\n/api/overview：冷 ${f(api[0].ms)}ms，预热后 ${f(api.slice(1).map((a) => a.ms).sort((a, b) => a - b)[2])}ms，响应 ${(api[0].size / 1024).toFixed(0)} KB`);
 
+// 日历订阅（没有运行器时 Worker 现场生成的耗时）
+const cal = [];
+for (let k = 0; k < 6; k++) {
+  clearPublicCache();
+  const t0 = performance.now(), d0 = dbMs;
+  const r = await handleApi(new Request('https://x/api/calendar.ics'), env, '/api/calendar.ics', makeCtx(env));
+  const body = await r.text();
+  cal.push({ ms: performance.now() - t0 - (dbMs - d0), size: body.length, n: body.split('BEGIN:VEVENT').length - 1 });
+}
+say(`/api/calendar.ics：冷 ${f(cal[0].ms)}ms，预热后 ${f(cal.slice(1).map((a) => a.ms).sort((a, b) => a - b)[2])}ms，${cal[0].n} 场，响应 ${(cal[0].size / 1024).toFixed(0)} KB`);
+
 // 每个 bo3 响应的大小（解析的主要成本）
 say('\n回放用到的外部响应（按大小）');
 for (const [u, r] of Object.entries(http).sort((a, b) => b[1].body.length - a[1].body.length).slice(0, 12)) {
